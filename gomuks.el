@@ -28,6 +28,9 @@
 (declare-function empv-play "empv" (uri))
 (declare-function empv-toggle "empv" ())
 (declare-function empv-seek "empv" (target &optional type))
+(declare-function emms-play-file "emms-source-file" (file))
+(declare-function emms-pause "emms" ())
+(declare-function emms-seek "emms" (duration))
 
 (defgroup gomuks nil "Frontend for the gomuks Matrix backend." :group 'applications)
 (defcustom gomuks-backend-url "http://localhost:29325"
@@ -55,6 +58,9 @@ The default shows them only while a Gomuks buffer is selected."
 (defcustom gomuks-inline-image-max-bytes (* 4 1024 1024)
   "Largest image automatically downloaded for an inline preview."
   :type 'integer :group 'gomuks)
+(defcustom gomuks-audio-backend 'empv
+  "Use EMPV or EMMS to play audio attachments."
+  :type '(choice (const empv) (const emms)) :group 'gomuks)
 
 (defface gomuks-title-face
   '((t :inherit bold :height 1.6)) "Home page title." :group 'gomuks)
@@ -2253,36 +2259,60 @@ When DELETE-AFTER-UPLOAD is non-nil, remove FILE when it is no longer needed."
           ((or (string-equal (downcase (or (file-name-extension path) "")) "ogg")
                (equal kind "m.audio")
                (and mime (string-prefix-p "audio/" mime)))
-           (if (require 'empv nil t)
-               (empv-play path)
-             (unless (executable-find "mpv")
-               (user-error "mpv is required to play audio attachments"))
-             (start-process "gomuks-audio" nil "mpv" "--no-video" "--" path)))
+           (pcase gomuks-audio-backend
+             ('emms
+              (unless (require 'emms-source-file nil t)
+                (user-error "EMMS is required to play audio attachments"))
+              (emms-play-file path))
+             ('empv
+              (if (require 'empv nil t)
+                  (empv-play path)
+                (unless (executable-find "mpv")
+                  (user-error "mpv is required to play audio attachments"))
+                (start-process "gomuks-audio" nil "mpv" "--no-video" "--" path)))))
           ((or (equal kind "m.video")
                (and mime (string-prefix-p "video/" mime)))
            (browse-url-default-browser (browse-url-file-url path)))
           (t (pop-to-buffer (find-file-noselect path)))))))))
 
 (defun gomuks-audio-toggle ()
-  "Pause or resume audio playing through EMPV."
+  "Pause or resume audio playing through the configured backend."
   (interactive)
-  (if (require 'empv nil t)
-      (empv-toggle)
-    (user-error "EMPV is required for audio controls")))
+  (pcase gomuks-audio-backend
+    ('emms
+     (unless (require 'emms nil t)
+       (user-error "EMMS is required for audio controls"))
+     (emms-pause))
+    ('empv
+     (if (require 'empv nil t)
+         (empv-toggle)
+       (user-error "EMPV is required for audio controls")))))
 
 (defun gomuks-audio-backward ()
-  "Seek five seconds backward in audio playing through EMPV."
+  "Seek five seconds backward in audio playing through the configured backend."
   (interactive)
-  (if (require 'empv nil t)
-      (empv-seek "-5")
-    (user-error "EMPV is required for audio controls")))
+  (pcase gomuks-audio-backend
+    ('emms
+     (unless (require 'emms nil t)
+       (user-error "EMMS is required for audio controls"))
+     (emms-seek -5))
+    ('empv
+     (if (require 'empv nil t)
+         (empv-seek "-5")
+       (user-error "EMPV is required for audio controls")))))
 
 (defun gomuks-audio-forward ()
-  "Seek five seconds forward in audio playing through EMPV."
+  "Seek five seconds forward in audio playing through the configured backend."
   (interactive)
-  (if (require 'empv nil t)
-      (empv-seek "5")
-    (user-error "EMPV is required for audio controls")))
+  (pcase gomuks-audio-backend
+    ('emms
+     (unless (require 'emms nil t)
+       (user-error "EMMS is required for audio controls"))
+     (emms-seek 5))
+    ('empv
+     (if (require 'empv nil t)
+         (empv-seek "5")
+       (user-error "EMPV is required for audio controls")))))
 
 (defun gomuks-open-thread (&optional event)
   "Open the thread containing EVENT, or the message at point."

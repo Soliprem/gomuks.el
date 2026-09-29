@@ -55,7 +55,9 @@ files and draft text stay put. Messages use room display names; hover over a
 sender for the full Matrix ID. Links in messages are clickable.
 
 Search covers history Gomuks has fetched. Small images preview inline in
-graphical Emacs. Audio playback requires `mpv`. GIF URLs must point directly
+graphical Emacs. Audio playback uses EMPV by default; set
+`gomuks-audio-backend` to `emms` to use your EMMS player instead. Both can use
+`mpv`, which is required for the default setup. GIF URLs must point directly
 to an image, rather than a web page.
 
 ## Keys
@@ -80,8 +82,8 @@ to an image, rather than a web page.
 | Room or composer | `C-c C-p` | Send a local image as a sticker |
 | Room or composer | `C-c C-g` | GIF/WebP file or direct HTTPS image URL (stage in composer) |
 | Room | `o` / `C-c C-o` | Open attachment at point |
-| Room | `C-c C-SPC` | Pause or resume audio (EMPV) |
-| Room | `C-c <` / `C-c >` | Seek audio back or forward five seconds (EMPV) |
+| Room | `C-c C-SPC` | Pause or resume audio |
+| Room | `C-c <` / `C-c >` | Seek audio back or forward five seconds |
 | Room | `D` / `C-c C-w` | Save attachment at point |
 | Room | `C-c C-u` | Copy sender's full Matrix ID |
 | Room | `M-p` | Load older messages |
