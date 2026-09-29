@@ -97,6 +97,8 @@ The default shows them only while a Gomuks buffer is selected."
   "Member event row IDs keyed by room ID and sender ID.")
 (defvar gomuks--requested-members (make-hash-table :test 'equal)
   "Member profiles already requested from the backend.")
+(defvar gomuks--mention-members-loaded (make-hash-table :test 'equal)
+  "Rooms whose member list has been requested for mention completion.")
 (defvar gomuks--timelines (make-hash-table :test 'equal)
   "Timeline event row IDs keyed by room ID.")
 (defvar gomuks--timeline-ids (make-hash-table :test 'equal)
@@ -276,8 +278,10 @@ The default shows them only while a Gomuks buffer is selected."
   "Mode for editing a Matrix message draft."
   (setq-local header-line-format
               " Compose a message  •  C-c C-c send  •  C-c C-a attach  •  C-c C-k return")
+  (setq-local completion-ignore-case t)
   (add-hook 'kill-buffer-hook #'gomuks--cleanup-compose-attachment nil t)
   (add-hook 'post-command-hook #'gomuks--maybe-mark-read nil t)
+  (add-hook 'completion-at-point-functions #'gomuks--mention-capf nil t)
   (visual-line-mode 1))
 (define-derived-mode gomuks-search-mode special-mode "Gomuks search"
   "Mode for paginated Gomuks message search results.")
@@ -387,6 +391,7 @@ The default shows them only while a Gomuks buffer is selected."
         gomuks--events (make-hash-table :test 'equal)
         gomuks--member-state (make-hash-table :test 'equal)
         gomuks--requested-members (make-hash-table :test 'equal)
+        gomuks--mention-members-loaded (make-hash-table :test 'equal)
         gomuks--timelines (make-hash-table :test 'equal)
         gomuks--timeline-ids (make-hash-table :test 'equal)
         gomuks--last-read (make-hash-table :test 'equal))
@@ -480,7 +485,8 @@ The default shows them only while a Gomuks buffer is selected."
   (dolist (id (gomuks--alist 'left_rooms sync))
     (remhash id gomuks--rooms)
     (remhash id gomuks--timelines)
-    (remhash id gomuks--member-state))
+    (remhash id gomuks--member-state)
+    (remhash id gomuks--mention-members-loaded))
   (dolist (entry (gomuks--alist 'rooms sync))
     (let* ((id (gomuks--key-string (car entry)))
            (room (cdr entry))
@@ -702,6 +708,86 @@ The default shows them only while a Gomuks buffer is selected."
                (string-match "\\`@\\([^:]+\\):" sender))
           (match-string 1 sender)
         (or sender "?")))))
+
+(defun gomuks--request-mention-members (id)
+  "Load the member list for room ID once for composer completion."
+  (when (and id (not (gethash id gomuks--mention-members-loaded)))
+    (puthash id 'loading gomuks--mention-members-loaded)
+    (gomuks--post
+     "get_room_state"
+     (append `((room_id . ,id) (include_members . t))
+             (unless (gomuks--alist 'has_member_list
+                                    (gethash id gomuks--rooms))
+               '((fetch_members . t))))
+     (lambda (failure events)
+       (if failure
+           (remhash id gomuks--mention-members-loaded)
+         (let ((state (or (gethash id gomuks--member-state)
+                          (make-hash-table :test 'equal))))
+           (dolist (event events)
+             (when (and (equal (gomuks--alist 'type event) "m.room.member")
+                        (equal (gomuks--alist 'room_id event) id))
+               (puthash (gomuks--alist 'rowid event) event gomuks--events)
+               (puthash (gomuks--alist 'state_key event)
+                        (gomuks--alist 'rowid event) state)))
+           (puthash id state gomuks--member-state)
+           (puthash id t gomuks--mention-members-loaded)))))))
+
+(defun gomuks--mention-capf ()
+  "Complete an @name in the composer with a room member."
+  (when (and gomuks--room-id
+             (save-excursion
+               (skip-chars-backward "^ \t\n@")
+               (eq (char-before) ?@)))
+    (gomuks--request-mention-members gomuks--room-id)
+    (let ((start (save-excursion
+                   (skip-chars-backward "^ \t\n@")
+                   (1- (point))))
+          (state (gethash gomuks--room-id gomuks--member-state))
+          candidates)
+      (when state
+        (maphash
+         (lambda (user-id rowid)
+           (when-let* ((event (gethash rowid gomuks--events)))
+             (when (member (gomuks--alist 'membership
+                                          (gomuks--event-content event))
+                           '("join" "invite"))
+               (push (cons (format "@%s (%s)"
+                                   (gomuks--sender-name gomuks--room-id
+                                                        `((sender . ,user-id)))
+                                   user-id)
+                           user-id)
+                     candidates))))
+         state))
+      (when candidates
+        (list start (point) (nreverse candidates)
+              :exit-function
+              (lambda (candidate status)
+                (when (eq status 'finished)
+                  (let ((user-id (cdr (assoc candidate candidates)))
+                        (name nil))
+                    (when user-id
+                      (setq name (gomuks--sender-name
+                                  gomuks--room-id `((sender . ,user-id))))
+                      (delete-region start (point))
+                      (insert (format "[%s](https://matrix.to/#/%s) "
+                                      (replace-regexp-in-string
+                                       "[][\\`*_()]"
+                                       (lambda (match) (concat "\\" match)) name)
+                                      (url-hexify-string user-id))))))))))))
+
+(defun gomuks--draft-mentions (text)
+  "Return Matrix mention metadata for completed mentions in TEXT."
+  (let ((start 0) ids)
+    (while (string-match "https://matrix\\.to/#/\\(%40[^)[:space:]]+\\)" text start)
+      (let ((end (match-end 0))
+            (id (url-unhex-string (match-string 1 text))))
+        (when (and (string-match-p "\\`@[^:]+:.+\\'" id)
+                   (not (member id ids)))
+          (push id ids))
+        (setq start end)))
+    (when ids
+      `((user_ids . ,(vconcat (nreverse ids)))))))
 
 (defun gomuks--request-missing-members (id events)
   "Fetch room member ID events needed to name senders in EVENTS."
@@ -1361,6 +1447,7 @@ and INITIAL-TEXT seeds a newly created draft."
     (set-window-buffer window buffer)
     (select-window window)
     (goto-char (point-max))
+    (gomuks--request-mention-members gomuks--room-id)
     (when (and (bound-and-true-p evil-mode)
                (fboundp 'evil-insert-state))
       (evil-insert-state))))
@@ -1411,6 +1498,9 @@ Use ID and RELATION for every attachment event."
                     "send_message"
                     (append `((room_id . ,id) (text . ,caption)
                               (base_content . ,content))
+                            (when (not (string-empty-p caption))
+                              (when-let* ((mentions (gomuks--draft-mentions caption)))
+                                `((mentions . ,mentions))))
                             (when relation `((relates_to . ,relation))))
                     (lambda (send-failure _response)
                       (if send-failure
@@ -1461,6 +1551,8 @@ Use ID and RELATION for every attachment event."
       (gomuks--post
        "send_message"
        (append `((room_id . ,id) (text . ,text))
+               (when-let* ((mentions (gomuks--draft-mentions text)))
+                 `((mentions . ,mentions)))
                (when relation `((relates_to . ,relation))))
        (lambda (failure _response)
          (gomuks--finish-compose-send buffer text failure))))))
