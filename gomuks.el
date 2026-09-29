@@ -16,6 +16,8 @@
 (require 'auth-source)
 (require 'browse-url)
 (require 'json)
+(require 'dom)
+(require 'shr)
 (require 'subr-x)
 (require 'url)
 (require 'url-http)
@@ -167,12 +169,14 @@ The default shows them only while a Gomuks buffer is selected."
     (define-key map (kbd "RET") #'gomuks-open-room)
     (define-key map (kbd "g") #'gomuks-reconnect)
     (define-key map (kbd "q") #'gomuks-quit)
+    (define-key map (kbd "C-k") #'gomuks-switch-room)
     map)
   "Keymap for the Gomuks home page.")
 (defvar gomuks-room-mode-map (make-sparse-keymap)
   "Keymap for room, thread, and reply context buffers.")
 ;; Bind after `defvar' so reloading updates the existing map in a daemon.
 (define-key gomuks-room-mode-map (kbd "C-c C-s") #'gomuks-compose)
+(define-key gomuks-room-mode-map (kbd "C-k") #'gomuks-switch-room)
 (define-key gomuks-room-mode-map (kbd "C-c C-a") #'gomuks-send-file)
 (define-key gomuks-room-mode-map (kbd "C-c C-p") #'gomuks-send-sticker)
 (define-key gomuks-room-mode-map (kbd "C-c C-g") #'gomuks-send-gif)
@@ -214,6 +218,7 @@ The default shows them only while a Gomuks buffer is selected."
 (define-key gomuks-compose-mode-map (kbd "C-c C-v") #'gomuks-paste-image)
 (define-key gomuks-compose-mode-map (kbd "C-c C-d") #'gomuks-compose-remove-attachment)
 (define-key gomuks-compose-mode-map (kbd "C-c C-o") #'gomuks-compose-preview-attachment)
+(define-key gomuks-compose-mode-map (kbd "C-k") #'gomuks-switch-room)
 
 ;; Doom's `map!' uses the user's configured localleader and its insert-state
 ;; alternate.  Keep this optional so the package also loads in plain Emacs.
@@ -254,6 +259,7 @@ The default shows them only while a Gomuks buffer is selected."
 (define-key gomuks-search-mode-map (kbd "n") #'gomuks-search-more)
 (define-key gomuks-search-mode-map (kbd "q") #'gomuks-search-back)
 (define-key gomuks-search-mode-map (kbd "b") #'gomuks-search-back)
+(define-key gomuks-search-mode-map (kbd "C-k") #'gomuks-switch-room)
 (defvar gomuks-reactions-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "d") #'gomuks-remove-reaction)
@@ -302,9 +308,11 @@ The default shows them only while a Gomuks buffer is selected."
   (evil-define-key* 'normal gomuks-rooms-mode-map
     (kbd "RET") #'gomuks-open-room
     (kbd "o") #'gomuks-open-room
+    (kbd "C-k") #'gomuks-switch-room
     (kbd "q") #'gomuks-quit
     (kbd "g r") #'gomuks-reconnect)
   (evil-define-key* 'normal gomuks-room-mode-map
+    (kbd "C-k") #'gomuks-switch-room
     (kbd "i") #'gomuks-compose
     (kbd "a") #'gomuks-send-file
     (kbd "r") #'gomuks-reply
@@ -328,6 +336,7 @@ The default shows them only while a Gomuks buffer is selected."
     (kbd "q") #'gomuks-back
     (kbd "g r") #'gomuks-reconnect)
   (evil-define-key* '(normal insert) gomuks-compose-mode-map
+    (kbd "C-k") #'gomuks-switch-room
     (kbd "C-c C-c") #'gomuks-compose-send
     (kbd "C-c C-k") #'gomuks-compose-leave
     (kbd "C-c C-a") #'gomuks-send-file
@@ -341,6 +350,7 @@ The default shows them only while a Gomuks buffer is selected."
   (evil-define-key* 'normal gomuks-compose-mode-map
     (kbd "q") #'gomuks-compose-leave)
   (evil-define-key* '(normal motion) gomuks-search-mode-map
+    (kbd "C-k") #'gomuks-switch-room
     (kbd "RET") #'gomuks-search-open
     (kbd "n") #'gomuks-search-more
     (kbd "q") #'gomuks-search-back
@@ -576,7 +586,8 @@ The default shows them only while a Gomuks buffer is selected."
                 "\n\n  " (propertize "HOME" 'face 'gomuks-heading-face)
                 (format "     %d rooms  ·  %d unread\n" (length entries) unread-total)
                 "  " (propertize "RET" 'face 'help-key-binding)
-                " open   " (propertize (if (bound-and-true-p evil-mode)
+                " open   " (propertize "C-k" 'face 'help-key-binding)
+                " switch   " (propertize (if (bound-and-true-p evil-mode)
                                              "g r" "g")
                                          'face 'help-key-binding)
                 " reconnect   " (propertize "q" 'face 'help-key-binding)
@@ -667,6 +678,30 @@ The default shows them only while a Gomuks buffer is selected."
            (string-match "\n\n" body))
       (substring body (match-end 0))
     body))
+
+(defun gomuks--formatted-body (content event)
+  "Render CONTENT's Matrix HTML, or return nil if it cannot be rendered.
+Remove the quoted reply fallback for EVENT before rendering."
+  (when (and (equal (gomuks--alist 'format content) "org.matrix.custom.html")
+             (stringp (gomuks--alist 'formatted_body content))
+             (fboundp 'libxml-parse-html-region))
+    (condition-case nil
+        (with-temp-buffer
+          (insert (gomuks--alist 'formatted_body content))
+          (let* ((dom (libxml-parse-html-region))
+                 (body (or (car (dom-by-tag dom 'body)) dom))
+                 (shr-width 10000)
+                 (shr-use-fonts nil)
+                 (shr-inhibit-images t))
+            (when (gomuks--reply-target event)
+              (setcdr (cdr body)
+                      (cl-remove-if (lambda (node)
+                                      (and (listp node) (eq (car node) 'mx-reply)))
+                                    (dom-children body))))
+            (erase-buffer)
+            (shr-insert-document dom)
+            (string-trim-right (buffer-string))))
+      (error nil))))
 
 (defun gomuks--reply-summary (room-id event-id)
   "Return a short label for EVENT-ID in ROOM-ID."
@@ -1029,7 +1064,8 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                        (gomuks--attachment content)))
          (body (if (gomuks--alist 'redacted_by event)
                    "[redacted]"
-                 (gomuks--visible-body event (gomuks--alist 'body content))))
+                 (or (gomuks--formatted-body content event)
+                     (gomuks--visible-body event (gomuks--alist 'body content)))))
          (reply-to (gomuks--reply-target event))
          (reactions (cl-remove-if-not
                      (lambda (entry) (and (numberp (cdr entry)) (> (cdr entry) 0)))
@@ -1158,7 +1194,8 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                 " compose   " (propertize (if (bound-and-true-p evil-mode)
                                              "p" "M-p")
                                          'face 'help-key-binding)
-                " older   " (propertize "b" 'face 'help-key-binding)
+                " older   " (propertize "C-k" 'face 'help-key-binding)
+                " switch   " (propertize "b" 'face 'help-key-binding)
                 " home   " (propertize "o" 'face 'help-key-binding)
                 " open   " (propertize "D" 'face 'help-key-binding)
                 " save\n\n")
@@ -1599,20 +1636,51 @@ Use ID and RELATION for every attachment event."
   (interactive)
   (let ((id (get-text-property (point) 'gomuks-room-id)))
     (unless id (user-error "No room on this line"))
-    (let ((buffer (get-buffer-create (format "*Gomuks: %s*" id))))
+    (gomuks--open-room-id id)))
+
+(defun gomuks-switch-room ()
+  "Choose a room from the cached room list and open it."
+  (interactive)
+  (let (rooms)
+    (maphash (lambda (id meta) (push (cons id meta) rooms)) gomuks--rooms)
+    (unless rooms (user-error "No rooms loaded yet"))
+    (setq rooms (sort rooms
+                      (lambda (a b)
+                        (> (or (gomuks--alist 'sorting_timestamp (cdr a)) 0)
+                           (or (gomuks--alist 'sorting_timestamp (cdr b)) 0)))))
+    (let* ((candidates
+            (mapcar (lambda (room)
+                      (let* ((id (car room))
+                             (name (replace-regexp-in-string
+                                    "[\n\r]+" " " (gomuks--room-name id)))
+                             (unread (or (gomuks--alist 'unread_notifications
+                                                       (cdr room)) 0)))
+                        (cons (format "%s%s  %s" name
+                                      (if (> unread 0) (format " (%d)" unread) "")
+                                      id)
+                              id)))
+                    rooms))
+           (completion-extra-properties '(:display-sort-function identity))
+           (choice (completing-read "Switch to room: " candidates nil t)))
+      (when-let* ((id (cdr (assoc choice candidates))))
+        (gomuks--open-room-id id)))))
+
+(defun gomuks--open-room-id (id)
+  "Open room ID and its composer."
+  (let ((buffer (get-buffer-create (format "*Gomuks: %s*" id))))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'gomuks-room-mode)
+        (gomuks-room-mode))
+      (setq gomuks--room-id id))
+    (gomuks--render-room id)
+    (gomuks--show-room buffer)
+    (when (with-current-buffer buffer
+            (and (null (gethash id gomuks--timelines))
+                 (not gomuks--initial-history-requested)))
       (with-current-buffer buffer
-        (unless (derived-mode-p 'gomuks-room-mode)
-          (gomuks-room-mode))
-        (setq gomuks--room-id id))
-      (gomuks--render-room id)
-      (gomuks--show-room buffer)
-      (when (with-current-buffer buffer
-              (and (null (gethash id gomuks--timelines))
-                   (not gomuks--initial-history-requested)))
-        (with-current-buffer buffer
-          (setq gomuks--initial-history-requested t)
-          (gomuks-load-history)))
-      (gomuks--maybe-mark-read))))
+        (setq gomuks--initial-history-requested t)
+        (gomuks-load-history)))
+    (gomuks--maybe-mark-read)))
 
 (defun gomuks--event-id-position (event-id)
   "Find the displayed position of EVENT-ID in the current buffer."

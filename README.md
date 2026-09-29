@@ -53,6 +53,7 @@ Files and clipboard images queue in the composer. They send as separate messages
 in order, with the draft text on the last attachment. If one fails, the unsent
 files and draft text stay put. Messages use room display names; hover over a
 sender for the full Matrix ID. Links in messages are clickable.
+Formatted Matrix messages display emphasis, links, and code in the timeline.
 
 Search covers history Gomuks has fetched. Small images preview inline in
 graphical Emacs. Audio playback uses EMPV by default; set
@@ -65,6 +66,7 @@ to an image, rather than a web page.
 | Mode | Key | Action |
 | --- | --- | --- |
 | Home | `RET` | Open room |
+| Home, room, composer, or search | `C-k` | Switch rooms by name |
 | Home | `g` | Reconnect |
 | Home | `q` | Restore previous windows |
 | Room | `C-c C-s` | Focus composer |
@@ -126,9 +128,8 @@ appear only while a Gomuks buffer is selected. Set
 `gomuks-echo-area-notifications` to `t` to show them everywhere, or `nil` to
 hide them entirely.
 
-This still renders plain text message bodies. Image previews work, but rich
-HTML, room management, typing indicators, and Matrix account setup aren't in
-the Emacs interface yet.
+Image previews work, but room management, typing indicators, and Matrix account
+setup aren't in the Emacs interface yet.
 
 To run the tests from this directory:
 
