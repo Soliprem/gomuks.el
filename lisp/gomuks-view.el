@@ -19,10 +19,10 @@
 ;;; Code:
 
 (require 'gomuks-compose)
-(declare-function gomuks-rooms-mode "gomuks")
-(declare-function gomuks-room-mode "gomuks")
-(declare-function gomuks-search-mode "gomuks")
-(declare-function gomuks-reactions-mode "gomuks")
+(declare-function gomuks-rooms-mode "gomuks-ui")
+(declare-function gomuks-room-mode "gomuks-ui")
+(declare-function gomuks-search-mode "gomuks-ui")
+(declare-function gomuks-reactions-mode "gomuks-ui")
 (declare-function notifications-notify "notifications")
 (declare-function emoji--init "emoji")
 (declare-function emoji--read-emoji "emoji")

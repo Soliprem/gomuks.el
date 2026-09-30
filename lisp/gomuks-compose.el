@@ -19,8 +19,8 @@
 ;;; Code:
 
 (require 'gomuks-media)
-(declare-function gomuks-compose-mode "gomuks")
-(declare-function gomuks-attachment-preview-mode "gomuks")
+(declare-function gomuks-compose-mode "gomuks-ui")
+(declare-function gomuks-attachment-preview-mode "gomuks-ui")
 (declare-function gomuks-home "gomuks-view")
 (declare-function gomuks--event-at-point "gomuks-view")
 (declare-function evil-insert-state "evil-commands")
