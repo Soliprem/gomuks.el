@@ -125,6 +125,13 @@ mode-map bindings: change the `C-c` keys with `define-key` on
 `map! :map gomuks-room-mode-map
 :localleader` in your config after Gomuks loads.
 
+## Hidden rooms
+
+`C-c C-x` hides or unhides the current room; `C-c C-h` opens a hidden room.
+There are no on-screen hints. Hidden rooms stay out of Home, unread counts,
+`C-k`, and gomuks.el notifications. Room IDs persist locally in
+`gomuks-hidden-rooms-file`; Matrix push rules and other clients are unaffected.
+
 ## Notifications and limits
 
 Desktop notifications are on when Emacs supports them. Set

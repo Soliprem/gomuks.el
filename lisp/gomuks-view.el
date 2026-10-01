@@ -55,7 +55,10 @@
             (status (if (and (string= gomuks--connection-status "Disconnected")
                              (process-live-p gomuks--stream))
                         "Connected" gomuks--connection-status)))
-        (maphash (lambda (id meta) (push (cons id meta) entries)) gomuks--rooms)
+        (maphash (lambda (id meta)
+                   (unless (member id gomuks--hidden-room-ids)
+                     (push (cons id meta) entries)))
+                 gomuks--rooms)
         (setq entries (sort entries
                             (lambda (a b)
                               (> (or (gomuks--alist 'sorting_timestamp (cdr a)) 0)
@@ -81,7 +84,9 @@
                 " leave\n\n  " (propertize "RECENT ROOMS" 'face 'gomuks-heading-face)
                 "\n\n")
         (unless entries
-          (insert "  Waiting for rooms from the backend…\n"))
+          (insert (if (> (hash-table-count gomuks--rooms) 0)
+                      "  No visible rooms.\n"
+                    "  Waiting for rooms from the backend…\n")))
         (dolist (entry entries)
           (let* ((start (point))
                  (id (car entry))
@@ -218,7 +223,8 @@ Remove the quoted reply fallback for EVENT before rendering."
 
 (defun gomuks--notify (id event)
   "Notify the user about EVENT in room ID."
-  (unless (gethash id gomuks--muted-rooms)
+  (unless (or (gethash id gomuks--muted-rooms)
+              (member id gomuks--hidden-room-ids))
     (let ((title (gomuks--room-name id))
           (body (format "%s: %s"
                         (gomuks--sender-name id event)
@@ -624,12 +630,16 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
          (message "gomuks: %s %s"
                   (if muted "unmuted" "muted") (gomuks--room-name id)))))))
 
-(defun gomuks-switch-room ()
-  "Choose a room from the cached room list and open it."
-  (interactive)
+(defun gomuks--switch-room (hidden)
+  "Choose a cached room and open it, selecting HIDDEN rooms when non-nil."
   (let (rooms)
-    (maphash (lambda (id meta) (push (cons id meta) rooms)) gomuks--rooms)
-    (unless rooms (user-error "No rooms loaded yet"))
+    (maphash (lambda (id meta)
+               (when (if hidden (member id gomuks--hidden-room-ids)
+                       (not (member id gomuks--hidden-room-ids)))
+                 (push (cons id meta) rooms)))
+             gomuks--rooms)
+    (unless rooms (user-error (if hidden "No hidden rooms loaded yet"
+                                "No rooms loaded yet")))
     (setq rooms (sort rooms
                       (lambda (a b)
                         (> (or (gomuks--alist 'sorting_timestamp (cdr a)) 0)
@@ -647,9 +657,33 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                               id)))
                     rooms))
            (completion-extra-properties '(:display-sort-function identity))
-           (choice (completing-read "Switch to room: " candidates nil t)))
+           (choice (completing-read (if hidden "Hidden room: " "Switch to room: ")
+                                    candidates nil t)))
       (when-let* ((id (cdr (assoc choice candidates))))
         (gomuks--open-room-id id)))))
+
+(defun gomuks-switch-room ()
+  "Choose a visible room from the cached room list and open it."
+  (interactive)
+  (gomuks--switch-room nil))
+
+(defun gomuks-switch-hidden-room ()
+  "Choose a hidden room and open it."
+  (interactive)
+  (gomuks--switch-room t))
+
+(defun gomuks-toggle-hidden-room ()
+  "Hide or unhide the room at point or in the current room buffer."
+  (interactive)
+  (let ((id (or gomuks--room-id (get-text-property (point) 'gomuks-room-id))))
+    (unless id (user-error "No room selected"))
+    (let ((hidden (member id gomuks--hidden-room-ids)))
+      (setq gomuks--hidden-room-ids
+            (if hidden (delete id gomuks--hidden-room-ids)
+              (cons id gomuks--hidden-room-ids)))
+      (gomuks--save-hidden-rooms)
+      (gomuks--render-rooms)
+      (message "gomuks: room %s" (if hidden "unhidden" "hidden")))))
 
 (defun gomuks--open-room-id (id)
   "Open room ID and its composer."

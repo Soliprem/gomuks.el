@@ -56,6 +56,10 @@ The default shows them only while a Gomuks buffer is selected."
 (defcustom gomuks-audio-backend 'empv
   "Use EMPV or EMMS to play audio attachments."
   :type '(choice (const empv) (const emms)) :group 'gomuks)
+(defcustom gomuks-hidden-rooms-file
+  (locate-user-emacs-file "gomuks-hidden-rooms")
+  "Local file containing room IDs hidden from the Gomuks interface."
+  :type 'file :group 'gomuks)
 
 (defface gomuks-title-face
   '((t :inherit bold :height 1.6)) "Home page title." :group 'gomuks)
@@ -86,6 +90,41 @@ The default shows them only while a Gomuks buffer is selected."
   "Incomplete line currently buffered from the event stream.")
 (defvar gomuks--rooms (make-hash-table :test 'equal)
   "Room metadata keyed by room ID.")
+(defvar gomuks--hidden-room-ids nil
+  "Room IDs hidden from the home page, normal switcher, and notifications.")
+
+(defun gomuks--load-hidden-rooms ()
+  "Load hidden room IDs from `gomuks-hidden-rooms-file'."
+  (setq gomuks--hidden-room-ids
+        (when (file-exists-p gomuks-hidden-rooms-file)
+          (condition-case err
+              (with-temp-buffer
+                (insert-file-contents gomuks-hidden-rooms-file)
+                (let ((ids (read (current-buffer))))
+                  (unless (and (listp ids) (cl-every #'stringp ids))
+                    (error "Invalid hidden room IDs"))
+                  ids))
+            (error
+             (message "gomuks: could not load hidden rooms: %s"
+                      (error-message-string err))
+             nil)))))
+
+(defun gomuks--save-hidden-rooms ()
+  "Save hidden room IDs to `gomuks-hidden-rooms-file'."
+  (let* ((directory (file-name-directory (expand-file-name gomuks-hidden-rooms-file)))
+         (temporary nil))
+    (make-directory directory t)
+    (unwind-protect
+        (progn
+          (setq temporary (make-temp-file (expand-file-name ".gomuks-hidden-" directory)))
+          (with-temp-file temporary
+            (prin1 gomuks--hidden-room-ids (current-buffer))
+            (insert "\n"))
+          (rename-file temporary gomuks-hidden-rooms-file t)
+          (setq temporary nil))
+      (when temporary (delete-file temporary)))))
+
+(gomuks--load-hidden-rooms)
 (defvar gomuks--muted-rooms (make-hash-table :test 'equal)
   "Room IDs muted by the current account's push rules.")
 (defvar gomuks--events (make-hash-table :test 'equal)

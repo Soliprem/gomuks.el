@@ -20,11 +20,15 @@
     map)
   "Keymap for the Gomuks home page.")
 (define-key gomuks-rooms-mode-map (kbd "m") #'gomuks-toggle-mute)
+(define-key gomuks-rooms-mode-map (kbd "C-c C-h") #'gomuks-switch-hidden-room)
+(define-key gomuks-rooms-mode-map (kbd "C-c C-x") #'gomuks-toggle-hidden-room)
 (defvar gomuks-room-mode-map (make-sparse-keymap)
   "Keymap for room, thread, and reply context buffers.")
 ;; Bind after `defvar' so reloading updates the existing map in a daemon.
 (define-key gomuks-room-mode-map (kbd "C-c C-s") #'gomuks-compose)
 (define-key gomuks-room-mode-map (kbd "C-k") #'gomuks-switch-room)
+(define-key gomuks-room-mode-map (kbd "C-c C-h") #'gomuks-switch-hidden-room)
+(define-key gomuks-room-mode-map (kbd "C-c C-x") #'gomuks-toggle-hidden-room)
 (define-key gomuks-room-mode-map (kbd "C-c C-a") #'gomuks-send-file)
 (define-key gomuks-room-mode-map (kbd "C-c C-p") #'gomuks-send-sticker)
 (define-key gomuks-room-mode-map (kbd "C-c C-g") #'gomuks-send-gif)
@@ -68,6 +72,7 @@
 (define-key gomuks-compose-mode-map (kbd "C-c C-d") #'gomuks-compose-remove-attachment)
 (define-key gomuks-compose-mode-map (kbd "C-c C-o") #'gomuks-compose-preview-attachment)
 (define-key gomuks-compose-mode-map (kbd "C-k") #'gomuks-switch-room)
+(define-key gomuks-compose-mode-map (kbd "C-c C-h") #'gomuks-switch-hidden-room)
 (define-key gomuks-compose-mode-map (kbd "C-c C-n") #'gomuks-toggle-mute)
 
 ;; Doom's `map!' uses the user's configured localleader and its insert-state
@@ -112,6 +117,7 @@
 (define-key gomuks-search-mode-map (kbd "q") #'gomuks-search-back)
 (define-key gomuks-search-mode-map (kbd "b") #'gomuks-search-back)
 (define-key gomuks-search-mode-map (kbd "C-k") #'gomuks-switch-room)
+(define-key gomuks-search-mode-map (kbd "C-c C-h") #'gomuks-switch-hidden-room)
 (defvar gomuks-reactions-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "d") #'gomuks-remove-reaction)
@@ -161,11 +167,15 @@
     (kbd "RET") #'gomuks-open-room
     (kbd "o") #'gomuks-open-room
     (kbd "m") #'gomuks-toggle-mute
+    (kbd "C-c C-h") #'gomuks-switch-hidden-room
+    (kbd "C-c C-x") #'gomuks-toggle-hidden-room
     (kbd "C-k") #'gomuks-switch-room
     (kbd "q") #'gomuks-quit
     (kbd "g r") #'gomuks-reconnect)
   (evil-define-key* 'normal gomuks-room-mode-map
     (kbd "C-k") #'gomuks-switch-room
+    (kbd "C-c C-h") #'gomuks-switch-hidden-room
+    (kbd "C-c C-x") #'gomuks-toggle-hidden-room
     (kbd "i") #'gomuks-compose
     (kbd "a") #'gomuks-send-file
     (kbd "r") #'gomuks-reply
@@ -191,6 +201,7 @@
     (kbd "g r") #'gomuks-reconnect)
   (evil-define-key* '(normal insert) gomuks-compose-mode-map
     (kbd "C-k") #'gomuks-switch-room
+    (kbd "C-c C-h") #'gomuks-switch-hidden-room
     (kbd "C-c C-c") #'gomuks-compose-send
     (kbd "C-c C-k") #'gomuks-compose-leave
     (kbd "C-c C-a") #'gomuks-send-file
@@ -207,6 +218,7 @@
     (kbd "q") #'gomuks-compose-leave)
   (evil-define-key* '(normal motion) gomuks-search-mode-map
     (kbd "C-k") #'gomuks-switch-room
+    (kbd "C-c C-h") #'gomuks-switch-hidden-room
     (kbd "RET") #'gomuks-search-open
     (kbd "n") #'gomuks-search-more
     (kbd "q") #'gomuks-search-back
