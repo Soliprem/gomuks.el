@@ -28,19 +28,24 @@
 (declare-function emms-pause "emms" ())
 (declare-function emms-seek "emms" (duration))
 
-(defun gomuks--attachment (content)
-  "Return attachment details from message CONTENT, if present."
+(defun gomuks--attachment (content &optional event)
+  "Return attachment details from message CONTENT and optional EVENT."
   (let* ((file (gomuks--alist 'file content))
          (mxc (or (gomuks--alist 'url file)
                   (gomuks--alist 'url content)))
-         (info (gomuks--alist 'info content)))
+         (info (gomuks--alist 'info content))
+         (name (or (gomuks--alist 'filename content)
+                   (gomuks--alist 'body content))))
     (when (and (stringp mxc) (string-prefix-p "mxc://" mxc))
       (list :mxc mxc :encrypted (and file t)
-            :name (or (gomuks--alist 'filename content)
-                      (gomuks--alist 'body content) "attachment")
+            :name (if (and (stringp name) (not (string-empty-p name)))
+                      name "attachment")
             :mime (gomuks--alist 'mimetype info)
             :size (gomuks--alist 'size info)
-            :kind (gomuks--alist 'msgtype content)))))
+            :kind (if (equal (or (gomuks--alist 'decrypted_type event)
+                                 (gomuks--alist 'type event)) "m.sticker")
+                      "m.sticker"
+                    (gomuks--alist 'msgtype content))))))
 
 (defun gomuks--upload-file (file room-id callback)
   "Upload FILE for ROOM-ID, then call CALLBACK with error and content."
@@ -208,11 +213,15 @@
 (defun gomuks--maybe-preview-image (attachment id)
   "Fetch a small image ATTACHMENT and redraw room ID when ready."
   (let ((key (gomuks--media-key attachment))
-        (size (plist-get attachment :size)))
-    (when (and gomuks-inline-images (display-images-p)
+        (size (plist-get attachment :size))
+        (sticker (equal (plist-get attachment :kind) "m.sticker")))
+    (when (and (or gomuks-inline-images
+                   sticker)
+               (display-images-p)
                (member (plist-get attachment :kind) '("m.image" "m.sticker"))
-               (numberp size)
-               (<= size gomuks-inline-image-max-bytes)
+               (or (and (numberp size)
+                        (<= size gomuks-inline-image-max-bytes))
+                   (and sticker (not (numberp size))))
                (not (gomuks--cached-media attachment))
                (not (gethash key gomuks--media-pending))
                (not (gethash key gomuks--media-failures)))
@@ -224,8 +233,8 @@
 (defun gomuks-save-attachment (&optional destination event)
   "Save the attachment in EVENT, or at point, to DESTINATION."
   (interactive)
-  (let ((attachment (gomuks--attachment
-                     (gomuks--event-content (or event (gomuks--event-at-point))))))
+  (let* ((event (or event (gomuks--event-at-point)))
+         (attachment (gomuks--attachment (gomuks--event-content event) event)))
     (unless attachment (user-error "No downloadable attachment on this line"))
     (setq destination
           (or destination
@@ -248,8 +257,8 @@
 (defun gomuks-open-attachment (&optional event)
   "Load the attachment in EVENT, or at point, and open it."
   (interactive)
-  (let* ((attachment (gomuks--attachment
-                      (gomuks--event-content (or event (gomuks--event-at-point)))))
+  (let* ((event (or event (gomuks--event-at-point)))
+         (attachment (gomuks--attachment (gomuks--event-content event) event))
          (mime (and attachment (plist-get attachment :mime)))
          (kind (and attachment (plist-get attachment :kind))))
     (unless attachment (user-error "No downloadable attachment on this line"))

@@ -27,6 +27,23 @@
 (declare-function emoji--init "emoji")
 (declare-function emoji--read-emoji "emoji")
 
+(defun gomuks--room-preview (event topic)
+  "Describe the latest EVENT in a room, falling back to TOPIC."
+  (let* ((content (gomuks--event-content event))
+         (attachment (gomuks--attachment content event))
+         (kind (plist-get attachment :kind))
+         (body (gomuks--alist 'body content)))
+    (cond
+     (attachment
+      (format "%s: %s"
+              (pcase kind
+                ("m.image" "Image") ("m.sticker" "Sticker")
+                ("m.video" "Video") ("m.audio" "Audio")
+                (_ "File"))
+              (plist-get attachment :name)))
+     ((and (stringp body) (not (string-empty-p (string-trim body)))) body)
+     (t (or topic "")))))
+
 (defun gomuks--render-rooms ()
   "Redraw the Gomuks home page from cached room state."
   (when-let* ((buffer (get-buffer "*Gomuks*")))
@@ -56,7 +73,8 @@
                 (format "     %d rooms  ·  %d unread\n" (length entries) unread-total)
                 "  " (propertize "RET" 'face 'help-key-binding)
                 " open   " (propertize "C-k" 'face 'help-key-binding)
-                " switch   " (propertize (if (bound-and-true-p evil-mode)
+                " switch   " (propertize "m" 'face 'help-key-binding)
+                " mute   " (propertize (if (bound-and-true-p evil-mode)
                                              "g r" "g")
                                          'face 'help-key-binding)
                 " reconnect   " (propertize "q" 'face 'help-key-binding)
@@ -71,14 +89,16 @@
                  (unread (or (gomuks--alist 'unread_notifications meta) 0))
                  (preview-event (gethash (gomuks--alist 'preview_event_rowid meta)
                                          gomuks--events))
-                 (preview (or (gomuks--alist 'body
-                                                  (gomuks--event-content preview-event))
-                              (gomuks--alist 'topic meta) "")))
+                 (preview (gomuks--room-preview preview-event
+                                                (gomuks--alist 'topic meta))))
             (insert "  "
                     (propertize (format "%-31s"
                                         (truncate-string-to-width
                                          (gomuks--room-name id) 30 nil nil "…"))
                                 'face 'gomuks-room-face)
+                    (if (gethash id gomuks--muted-rooms)
+                        (propertize "[muted] " 'face 'shadow)
+                      "")
                     (propertize (truncate-string-to-width
                                  (replace-regexp-in-string "[\n\r]+" " " preview)
                                  (max 12 (- (window-width) 50)) nil nil "…")
@@ -198,18 +218,19 @@ Remove the quoted reply fallback for EVENT before rendering."
 
 (defun gomuks--notify (id event)
   "Notify the user about EVENT in room ID."
-  (let ((title (gomuks--room-name id))
-        (body (format "%s: %s"
-                      (gomuks--sender-name id event)
-                      (or (gomuks--alist 'body (gomuks--event-content event))
-                          "[new message]"))))
-    (when (gomuks--echo-area-notifications-p)
-      (message "gomuks %s — %s" title body))
-    (when (and gomuks-desktop-notifications
-               (require 'notifications nil t))
-      (condition-case nil
-          (notifications-notify :title title :body body :app-name "gomuks.el")
-        (error nil)))))
+  (unless (gethash id gomuks--muted-rooms)
+    (let ((title (gomuks--room-name id))
+          (body (format "%s: %s"
+                        (gomuks--sender-name id event)
+                        (or (gomuks--alist 'body (gomuks--event-content event))
+                            "[new message]"))))
+      (when (gomuks--echo-area-notifications-p)
+        (message "gomuks %s — %s" title body))
+      (when (and gomuks-desktop-notifications
+                 (require 'notifications nil t))
+        (condition-case nil
+            (notifications-notify :title title :body body :app-name "gomuks.el")
+          (error nil))))))
 
 (defun gomuks--event-at-point ()
   "Return the message event at point, or signal a user error."
@@ -254,27 +275,39 @@ Remove the quoted reply fallback for EVENT before rendering."
          (size (plist-get attachment :size))
          (kind (or (plist-get attachment :kind) "m.file"))
          (cached (gomuks--cached-media attachment)))
-    (insert "    " (propertize (format "[%s]" (upcase (string-remove-prefix "m." kind)))
-                                'face 'gomuks-heading-face)
-            " " (propertize name 'face 'gomuks-room-face))
-    (when (numberp size)
-      (insert "  " (propertize (file-size-human-readable size) 'face 'shadow)))
-    (insert "  ")
-    (insert-text-button "Open" 'face 'link 'follow-link t
-                        'action (lambda (_button) (gomuks-open-attachment event)))
-    (insert "  ")
-    (insert-text-button "Save" 'face 'link 'follow-link t
-                        'action (lambda (_button) (gomuks-save-attachment nil event)))
-    (insert "\n")
-    (when (and cached (display-images-p)
-               (member kind '("m.image" "m.sticker")))
-      (condition-case nil
-          (when-let* ((image (create-image cached nil nil
-                                          :max-width 360 :max-height 220)))
-            (insert "    ")
-            (insert-image image "[image preview]")
-            (insert "\n"))
-        (error nil)))
+    (if (equal kind "m.sticker")
+        (progn
+          (insert "    ")
+          (insert-text-button
+           (format "[Sticker: %s]" name)
+           'face 'link 'follow-link t
+           'help-echo "Open sticker; press D to save"
+           'display (when (and cached (display-images-p))
+                      (condition-case nil
+                          (create-image cached nil nil :max-width 160 :max-height 160)
+                        (error nil)))
+           'action (lambda (_button) (gomuks-open-attachment event)))
+          (insert "\n"))
+      (insert "    " (propertize (format "[%s]" (upcase (string-remove-prefix "m." kind)))
+                                  'face 'gomuks-heading-face)
+              " " (propertize name 'face 'gomuks-room-face))
+      (when (numberp size)
+        (insert "  " (propertize (file-size-human-readable size) 'face 'shadow)))
+      (insert "  ")
+      (insert-text-button "Open" 'face 'link 'follow-link t
+                          'action (lambda (_button) (gomuks-open-attachment event)))
+      (insert "  ")
+      (insert-text-button "Save" 'face 'link 'follow-link t
+                          'action (lambda (_button) (gomuks-save-attachment nil event)))
+      (insert "\n")
+      (when (and cached (display-images-p) (equal kind "m.image"))
+        (condition-case nil
+            (when-let* ((image (create-image cached nil nil
+                                            :max-width 360 :max-height 220)))
+              (insert "    ")
+              (insert-image image "[image preview]")
+              (insert "\n"))
+          (error nil))))
     (gomuks--maybe-preview-image attachment gomuks--room-id)))
 
 (defun gomuks--insert-event (event &optional previous thread-counts)
@@ -287,7 +320,7 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                           (gomuks--event-content edit))
                     (gomuks--event-content event)))
          (attachment (unless (gomuks--alist 'redacted_by event)
-                       (gomuks--attachment content)))
+                       (gomuks--attachment content event)))
          (body (if (gomuks--alist 'redacted_by event)
                    "[redacted]"
                  (or (gomuks--formatted-body content event)
@@ -328,7 +361,7 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
            'help-echo "Follow reply"
            'action (lambda (_button) (gomuks-follow-reply reply-to)))
           (insert "\n        "))
-        (when (and body
+        (when (and body (not (equal (plist-get attachment :kind) "m.sticker"))
                    (or (not attachment)
                        (not (equal body (plist-get attachment :name)))))
           (let ((body-start (point)))
@@ -339,7 +372,8 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
           (insert (if (gomuks--alist 'decryption_error event)
                       "[unable to decrypt]" "[encrypted]") "\n"))
         (when (and attachment
-                   (or (not body) (equal body (plist-get attachment :name))))
+                   (or (equal (plist-get attachment :kind) "m.sticker")
+                       (not body) (equal body (plist-get attachment :name))))
           (insert "\n"))
         (when attachment
           (gomuks--insert-attachment event attachment))
@@ -381,6 +415,8 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
          (kind (cond (gomuks--context-target "REPLY CONTEXT")
                      (gomuks--thread-root "THREAD"))))
     (concat " " (propertize name 'face 'gomuks-room-face)
+            (when (gethash id gomuks--muted-rooms)
+              (propertize "  [muted]" 'face 'shadow))
             (when kind (concat "  ·  " (propertize kind 'face 'gomuks-heading-face)))
             (when (and (stringp topic) (not (string-empty-p topic)))
               (concat "  ·  "
@@ -568,6 +604,25 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
   (let ((id (get-text-property (point) 'gomuks-room-id)))
     (unless id (user-error "No room on this line"))
     (gomuks--open-room-id id)))
+
+(defun gomuks-toggle-mute ()
+  "Toggle Matrix push notifications for the room at point or in this buffer."
+  (interactive)
+  (let* ((id (or gomuks--room-id (get-text-property (point) 'gomuks-room-id)))
+         (muted (and id (gethash id gomuks--muted-rooms))))
+    (unless id (user-error "No room selected"))
+    (gomuks--post
+     "mute_room" `((room_id . ,id) (muted . ,(if muted :false t)))
+     (lambda (failure _response)
+       (if failure
+           (message "gomuks: could not %s %s: %s"
+                    (if muted "unmute" "mute") (gomuks--room-name id) failure)
+         (if muted (remhash id gomuks--muted-rooms)
+           (puthash id t gomuks--muted-rooms))
+         (gomuks--render-rooms)
+         (gomuks--render-room id)
+         (message "gomuks: %s %s"
+                  (if muted "unmuted" "muted") (gomuks--room-name id)))))))
 
 (defun gomuks-switch-room ()
   "Choose a room from the cached room list and open it."

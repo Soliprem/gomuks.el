@@ -19,6 +19,7 @@
     (define-key map (kbd "C-k") #'gomuks-switch-room)
     map)
   "Keymap for the Gomuks home page.")
+(define-key gomuks-rooms-mode-map (kbd "m") #'gomuks-toggle-mute)
 (defvar gomuks-room-mode-map (make-sparse-keymap)
   "Keymap for room, thread, and reply context buffers.")
 ;; Bind after `defvar' so reloading updates the existing map in a daemon.
@@ -42,6 +43,7 @@
 (define-key gomuks-room-mode-map (kbd "C-c C-+") #'gomuks-react)
 (define-key gomuks-room-mode-map (kbd "C-c C-d") #'gomuks-redact)
 (define-key gomuks-room-mode-map (kbd "C-c C-m") #'gomuks-mark-read)
+(define-key gomuks-room-mode-map (kbd "C-c C-n") #'gomuks-toggle-mute)
 (define-key gomuks-room-mode-map (kbd "C-c C-u") #'gomuks-copy-sender-id)
 (define-key gomuks-room-mode-map (kbd "M-p") #'gomuks-load-history)
 (define-key gomuks-room-mode-map (kbd "C-c C-t") #'gomuks-open-thread)
@@ -66,6 +68,7 @@
 (define-key gomuks-compose-mode-map (kbd "C-c C-d") #'gomuks-compose-remove-attachment)
 (define-key gomuks-compose-mode-map (kbd "C-c C-o") #'gomuks-compose-preview-attachment)
 (define-key gomuks-compose-mode-map (kbd "C-k") #'gomuks-switch-room)
+(define-key gomuks-compose-mode-map (kbd "C-c C-n") #'gomuks-toggle-mute)
 
 ;; Doom's `map!' uses the user's configured localleader and its insert-state
 ;; alternate.  Keep this optional so the package also loads in plain Emacs.
@@ -86,6 +89,7 @@
           "+" #'gomuks-react
           "d" #'gomuks-redact
           "m" #'gomuks-mark-read
+          "n" #'gomuks-toggle-mute
           "u" #'gomuks-copy-sender-id
           "t" #'gomuks-open-thread
           "j" #'gomuks-follow-reply
@@ -99,6 +103,7 @@
           "p" #'gomuks-send-sticker
           "g" #'gomuks-send-gif
           "e" #'gomuks-insert-emoji
+          "n" #'gomuks-toggle-mute
           "v" #'gomuks-paste-image)))
 (defvar gomuks-search-mode-map (make-sparse-keymap)
   "Keymap for Gomuks search results.")
@@ -155,6 +160,7 @@
   (evil-define-key* 'normal gomuks-rooms-mode-map
     (kbd "RET") #'gomuks-open-room
     (kbd "o") #'gomuks-open-room
+    (kbd "m") #'gomuks-toggle-mute
     (kbd "C-k") #'gomuks-switch-room
     (kbd "q") #'gomuks-quit
     (kbd "g r") #'gomuks-reconnect)
@@ -167,6 +173,7 @@
     (kbd "R") #'gomuks-react
     (kbd "x") #'gomuks-redact
     (kbd "M") #'gomuks-mark-read
+    (kbd "C-c C-n") #'gomuks-toggle-mute
     (kbd "U") #'gomuks-copy-sender-id
     (kbd "p") #'gomuks-load-history
     (kbd "T") #'gomuks-open-thread
@@ -188,6 +195,8 @@
     (kbd "C-c C-k") #'gomuks-compose-leave
     (kbd "C-c C-a") #'gomuks-send-file
     (kbd "C-c C-d") #'gomuks-compose-remove-attachment)
+  (evil-define-key* '(normal insert) gomuks-compose-mode-map
+    (kbd "C-c C-n") #'gomuks-toggle-mute)
   (evil-define-key* '(normal insert) gomuks-compose-mode-map
     (kbd "C-c C-p") #'gomuks-send-sticker
     (kbd "C-c C-g") #'gomuks-send-gif

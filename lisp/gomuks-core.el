@@ -86,6 +86,8 @@ The default shows them only while a Gomuks buffer is selected."
   "Incomplete line currently buffered from the event stream.")
 (defvar gomuks--rooms (make-hash-table :test 'equal)
   "Room metadata keyed by room ID.")
+(defvar gomuks--muted-rooms (make-hash-table :test 'equal)
+  "Room IDs muted by the current account's push rules.")
 (defvar gomuks--events (make-hash-table :test 'equal)
   "Cached events keyed by backend row ID.")
 (defvar gomuks--member-state (make-hash-table :test 'equal)

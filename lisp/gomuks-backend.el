@@ -100,6 +100,7 @@ followed by the parsed response or nil."
   (setq gomuks--pending ""
         gomuks--user-id nil
         gomuks--rooms (make-hash-table :test 'equal)
+        gomuks--muted-rooms (make-hash-table :test 'equal)
         gomuks--events (make-hash-table :test 'equal)
         gomuks--member-state (make-hash-table :test 'equal)
         gomuks--requested-members (make-hash-table :test 'equal)
@@ -186,6 +187,16 @@ followed by the parsed response or nil."
 (defun gomuks--apply-sync (sync)
   "Apply room and notification changes from SYNC."
   (when (gomuks--alist 'clear_state sync) (gomuks--reset))
+  (when-let* ((rules (gomuks--alist 'm.push_rules
+                                   (gomuks--alist 'account_data sync))))
+    (let ((muted (make-hash-table :test 'equal)))
+      (dolist (rule (gomuks--alist 'room
+                                  (gomuks--alist 'global
+                                                  (gomuks--alist 'content rules))))
+        (when (and (gomuks--alist 'enabled rule)
+                   (not (member "notify" (gomuks--alist 'actions rule))))
+          (puthash (gomuks--alist 'rule_id rule) t muted)))
+      (setq gomuks--muted-rooms muted)))
   (dolist (id (gomuks--alist 'left_rooms sync))
     (remhash id gomuks--rooms)
     (remhash id gomuks--timelines)
