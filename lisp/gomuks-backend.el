@@ -24,6 +24,7 @@
 (declare-function gomuks--render-buffer "gomuks-view" (buffer id))
 (declare-function gomuks--maybe-mark-read "gomuks-view")
 (declare-function gomuks--notify "gomuks-view" (id event))
+(declare-function gomuks--reset-views "gomuks-view" (&optional room-id))
 
 (defun gomuks--request (path data callback &optional content-type)
   "POST DATA to backend PATH and pass the result to CALLBACK.
@@ -48,12 +49,15 @@ followed by the parsed response or nil."
                                 (point-min))
                             (point-max))))
                  (if (and (null (plist-get status :error)) (= code 200))
-                     (condition-case err
-                         (funcall callback nil (json-parse-string body :object-type 'alist
-                                                                 :array-type 'list
-                                                                 :false-object nil
-                                                                 :null-object nil))
-                       (error (funcall callback (format "Invalid JSON response: %s" err) nil)))
+                     (let (response failure)
+                       (condition-case err
+                           (setq response
+                                 (json-parse-string body :object-type 'alist
+                                                    :array-type 'list
+                                                    :false-object nil
+                                                    :null-object nil))
+                         (error (setq failure (format "Invalid JSON response: %s" err))))
+                       (funcall callback failure response))
                    (funcall callback (format "HTTP %s: %s" code
                                              (or (plist-get status :error) body)) nil))))
            (when (buffer-live-p response-buffer)
@@ -95,24 +99,6 @@ followed by the parsed response or nil."
       (cons (plist-get entry :user)
             (if (functionp secret) (funcall secret) secret)))))
 
-(defun gomuks--reset ()
-  "Clear cached room, event, and timeline state."
-  (setq gomuks--pending ""
-        gomuks--user-id nil
-        gomuks--rooms (make-hash-table :test 'equal)
-        gomuks--muted-rooms (make-hash-table :test 'equal)
-        gomuks--events (make-hash-table :test 'equal)
-        gomuks--member-state (make-hash-table :test 'equal)
-        gomuks--requested-members (make-hash-table :test 'equal)
-        gomuks--mention-members-loaded (make-hash-table :test 'equal)
-        gomuks--timelines (make-hash-table :test 'equal)
-        gomuks--timeline-ids (make-hash-table :test 'equal)
-        gomuks--last-read (make-hash-table :test 'equal))
-  (dolist (buffer (buffer-list))
-    (with-current-buffer buffer
-      (when (derived-mode-p 'gomuks-room-mode)
-        (setq gomuks--initial-history-requested nil)))))
-
 (defun gomuks--start-stream ()
   "Start the backend event stream and cancel any scheduled reconnect."
   (when gomuks--reconnect-timer
@@ -139,19 +125,20 @@ followed by the parsed response or nil."
                (format "header = \"Authorization: %s\"\n" authorization))))
     (process-send-eof process)))
 
-(defun gomuks--stream-filter (_process chunk)
+(defun gomuks--stream-filter (process chunk)
   "Parse complete JSON lines from event stream CHUNK."
-  (setq gomuks--pending (concat gomuks--pending chunk))
-  (while (string-match "\n" gomuks--pending)
-    (let ((line (substring gomuks--pending 0 (match-beginning 0))))
-      (setq gomuks--pending (substring gomuks--pending (match-end 0)))
-      (unless (or (string-empty-p line) (string= line "null"))
-        (condition-case err
-            (gomuks--handle-event (json-parse-string line :object-type 'alist
-                                                    :array-type 'list
-                                                    :false-object nil
-                                                    :null-object nil))
-          (error (message "gomuks: invalid stream event: %s" err)))))))
+  (when (eq process gomuks--stream)
+    (setq gomuks--pending (concat gomuks--pending chunk))
+    (while (and (eq process gomuks--stream) (string-match "\n" gomuks--pending))
+      (let ((line (substring gomuks--pending 0 (match-beginning 0))))
+	(setq gomuks--pending (substring gomuks--pending (match-end 0)))
+	(unless (or (string-empty-p line) (string= line "null"))
+          (condition-case err
+              (gomuks--handle-event (json-parse-string line :object-type 'alist
+                                                       :array-type 'list
+                                                       :false-object nil
+                                                       :null-object nil))
+            (error (message "gomuks: invalid stream event: %s" err))))))))
 
 (defun gomuks--stream-sentinel (process event)
   "Schedule reconnection when stream PROCESS ends with EVENT."
@@ -186,7 +173,9 @@ followed by the parsed response or nil."
 
 (defun gomuks--apply-sync (sync)
   "Apply room and notification changes from SYNC."
-  (when (gomuks--alist 'clear_state sync) (gomuks--reset))
+  (when (gomuks--alist 'clear_state sync)
+    (gomuks--reset-cache)
+    (gomuks--reset-views))
   (when-let* ((rules (gomuks--alist 'm.push_rules
                                    (gomuks--alist 'account_data sync))))
     (let ((muted (make-hash-table :test 'equal)))
@@ -198,6 +187,8 @@ followed by the parsed response or nil."
           (puthash (gomuks--alist 'rule_id rule) t muted)))
       (setq gomuks--muted-rooms muted)))
   (dolist (id (gomuks--alist 'left_rooms sync))
+    (gomuks--reset-room-cache id)
+    (gomuks--reset-views id)
     (remhash id gomuks--rooms)
     (remhash id gomuks--timelines)
     (remhash id gomuks--member-state)
@@ -223,11 +214,8 @@ followed by the parsed response or nil."
             (puthash (gomuks--key-string (car entry)) (cdr entry) state))
           (puthash id state gomuks--member-state)))
       (when (gomuks--alist 'reset room)
-        (puthash id nil gomuks--timelines)
-        (puthash id nil gomuks--timeline-ids)
-        (when-let* ((buffer (get-buffer (format "*Gomuks: %s*" id))))
-          (with-current-buffer buffer
-            (setq gomuks--initial-history-requested nil))))
+        (gomuks--reset-room-cache id)
+        (gomuks--reset-views id))
       (when timeline
         (dolist (item timeline)
           (let ((rowid (gomuks--alist 'event_rowid item))

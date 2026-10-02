@@ -213,6 +213,7 @@
 (defun gomuks--maybe-preview-image (attachment id)
   "Fetch a small image ATTACHMENT and redraw room ID when ready."
   (let ((key (gomuks--media-key attachment))
+        (generation (gomuks--cache-token id))
         (size (plist-get attachment :size))
         (sticker (equal (plist-get attachment :kind) "m.sticker")))
     (when (and (or gomuks-inline-images
@@ -228,7 +229,8 @@
       (gomuks--fetch-media
        attachment
        (lambda (path)
-         (when path (gomuks--render-room id)))))))
+         (when (and path (gomuks--cache-current-p id generation))
+           (gomuks--render-room id)))))))
 
 (defun gomuks-save-attachment (&optional destination event)
   "Save the attachment in EVENT, or at point, to DESTINATION."

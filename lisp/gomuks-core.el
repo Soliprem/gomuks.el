@@ -145,12 +145,54 @@ The default shows them only while a Gomuks buffer is selected."
   "Window configuration saved before opening the home page.")
 (defvar gomuks--connection-status "Disconnected"
   "Status text displayed on the home page.")
+(defvar gomuks--cache-generation 0
+  "Generation of the entire room cache; advanced by a full reset.")
+(defvar gomuks--room-generations (make-hash-table :test 'equal)
+  "Request generations keyed by room ID; advanced by a room reset or leave.")
 (defvar gomuks--media-cache (make-hash-table :test 'equal)
   "Downloaded media paths keyed by attachment identity.")
 (defvar gomuks--media-pending (make-hash-table :test 'equal)
   "Callbacks waiting for each in-progress media download.")
 (defvar gomuks--media-failures (make-hash-table :test 'equal)
   "Attachments whose automatic preview download failed.")
+
+(defun gomuks--reset-cache ()
+  "Clear cached room data. Preserve account identity and pending stream data."
+  (setq gomuks--cache-generation (1+ gomuks--cache-generation)
+        gomuks--room-generations (make-hash-table :test 'equal)
+        gomuks--rooms (make-hash-table :test 'equal)
+        gomuks--muted-rooms (make-hash-table :test 'equal)
+        gomuks--events (make-hash-table :test 'equal)
+        gomuks--member-state (make-hash-table :test 'equal)
+        gomuks--requested-members (make-hash-table :test 'equal)
+        gomuks--mention-members-loaded (make-hash-table :test 'equal)
+        gomuks--timelines (make-hash-table :test 'equal)
+        gomuks--timeline-ids (make-hash-table :test 'equal)
+        gomuks--last-read (make-hash-table :test 'equal)))
+
+(defun gomuks--cache-token (room-id)
+  "Return the current cache and room generations for ROOM-ID."
+  (cons gomuks--cache-generation (gethash room-id gomuks--room-generations 0)))
+
+(defun gomuks--cache-current-p (room-id token)
+  "Return non-nil when TOKEN still belongs to ROOM-ID's current cache."
+  (equal token (gomuks--cache-token room-id)))
+
+(defun gomuks--reset-room-cache (room-id)
+  "Invalidate ROOM-ID's requests and clear its timeline and request markers.
+Preserve cached events, room metadata, and member indexes."
+  (puthash room-id (1+ (gethash room-id gomuks--room-generations 0))
+           gomuks--room-generations)
+  (dolist (rowid (gethash room-id gomuks--timelines))
+    (remhash rowid gomuks--timeline-ids))
+  (remhash room-id gomuks--timelines)
+  (remhash room-id gomuks--last-read)
+  (remhash room-id gomuks--mention-members-loaded)
+  (maphash (lambda (key _value)
+             (when (equal (car key) room-id)
+               (remhash key gomuks--requested-members)))
+           gomuks--requested-members))
+
 (defvar-local gomuks--room-id nil
   "Room ID associated with the current Gomuks buffer.")
 (defvar-local gomuks--reactions-event nil

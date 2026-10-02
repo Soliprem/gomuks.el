@@ -27,6 +27,38 @@
 (declare-function emoji--init "emoji")
 (declare-function emoji--read-emoji "emoji")
 
+(defun gomuks--view-identity ()
+  "Return the identity of the current room, search, or reactions view."
+  (list major-mode gomuks--room-id gomuks--thread-root gomuks--context-target
+        gomuks--search-generation gomuks--reactions-key
+        (gomuks--alist 'event_id gomuks--reactions-event)))
+
+(defun gomuks--view-current-p (buffer identity)
+  "Return non-nil when BUFFER is live and still represents IDENTITY."
+  (and (buffer-live-p buffer)
+       (with-current-buffer buffer (equal identity (gomuks--view-identity)))))
+
+(defun gomuks--reset-views (&optional room-id)
+  "Clear retained data and request state in room, search, and reaction views.
+Preserve view targets, queries, and parent buffers.  When ROOM-ID is
+non-nil, update only views for that room.  Start no requests."
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (and (derived-mode-p 'gomuks-room-mode 'gomuks-search-mode
+                                'gomuks-reactions-mode)
+                 (or (null room-id)
+                     (equal gomuks--room-id room-id)))
+        (setq gomuks--initial-history-requested nil
+              gomuks--thread-events nil gomuks--thread-next-batch nil
+              gomuks--context-events nil
+              gomuks--search-results nil gomuks--search-next-batch nil
+              gomuks--search-loading nil gomuks--search-error nil
+              gomuks--search-generation (1+ gomuks--search-generation)
+              gomuks--reactions-event nil gomuks--reactions-key nil
+              header-line-format nil)
+        (let ((inhibit-read-only t)) (erase-buffer))))))
+
+
 (defun gomuks--room-preview (event topic)
   "Describe the latest EVENT in a room, falling back to TOPIC."
   (let* ((content (gomuks--event-content event))
@@ -69,8 +101,8 @@
         (erase-buffer)
         (insert "\n  " (propertize "gomuks" 'face 'gomuks-title-face)
                 "     " (propertize status
-                                     'face (if (string= status "Connected")
-                                               'success 'shadow))
+                                    'face (if (string= status "Connected")
+                                              'success 'shadow))
                 "\n  " (propertize "Matrix in Emacs" 'face 'shadow)
                 "\n\n  " (propertize "HOME" 'face 'gomuks-heading-face)
                 (format "     %d rooms  ·  %d unread\n" (length entries) unread-total)
@@ -78,8 +110,8 @@
                 " open   " (propertize "C-k" 'face 'help-key-binding)
                 " switch   " (propertize "m" 'face 'help-key-binding)
                 " mute   " (propertize (if (bound-and-true-p evil-mode)
-                                             "g r" "g")
-                                         'face 'help-key-binding)
+                                           "g r" "g")
+                                       'face 'help-key-binding)
                 " reconnect   " (propertize "q" 'face 'help-key-binding)
                 " leave\n\n  " (propertize "RECENT ROOMS" 'face 'gomuks-heading-face)
                 "\n\n")
@@ -114,10 +146,10 @@
                     "\n")
             (put-text-property start (point) 'gomuks-room-id id)))
         (goto-char (or (and selected
-                           (text-property-any (point-min) (point-max)
-                                              'gomuks-room-id selected))
-                      (next-single-property-change (point-min) 'gomuks-room-id)
-                      (point-min)))))))
+                            (text-property-any (point-min) (point-max)
+                                               'gomuks-room-id selected))
+                       (next-single-property-change (point-min) 'gomuks-room-id)
+                       (point-min)))))))
 
 (defun gomuks--visible-body (event body)
   "Return BODY without Matrix's quoted reply fallback for EVENT."
@@ -179,7 +211,8 @@ Remove the quoted reply fallback for EVENT before rendering."
 (defun gomuks--request-missing-members (id events)
   "Fetch room member ID events needed to name senders in EVENTS."
   (when (process-live-p gomuks--stream)
-    (let (keys)
+    (let ((keys nil)
+          (generation (gomuks--cache-token id)))
       (dolist (event events)
         (when-let* ((sender (gomuks--alist 'sender event)))
           (let ((rowid (when-let* ((state (gethash id gomuks--member-state)))
@@ -192,23 +225,24 @@ Remove the quoted reply fallback for EVENT before rendering."
                       (state_key . ,sender)) keys)))))
       (when keys
         (gomuks--post
-         "get_specific_room_state" `((keys . ,(vconcat (nreverse keys))))
+         "get_specific_room_state" `((keys . ,(vconcat (reverse keys))))
          (lambda (failure response)
-           (if failure
-               (dolist (key keys)
-                 (remhash (cons id (gomuks--alist 'state_key key))
-                          gomuks--requested-members))
-             (let ((state (or (gethash id gomuks--member-state)
-                              (make-hash-table :test 'equal))))
-               (dolist (event response)
-                 (when (and (equal (gomuks--alist 'type event) "m.room.member")
-                            (equal (gomuks--alist 'room_id event) id))
-                   (puthash (gomuks--alist 'rowid event) event gomuks--events)
-                   (unless (gethash (gomuks--alist 'state_key event) state)
-                     (puthash (gomuks--alist 'state_key event)
-                              (gomuks--alist 'rowid event) state))))
-               (puthash id state gomuks--member-state)
-               (gomuks--render-room id)))))))))
+           (when (gomuks--cache-current-p id generation)
+             (if failure
+                 (dolist (key keys)
+                   (remhash (cons id (gomuks--alist 'state_key key))
+                            gomuks--requested-members))
+               (let ((state (or (gethash id gomuks--member-state)
+                                (make-hash-table :test 'equal))))
+                 (dolist (event response)
+                   (when (and (equal (gomuks--alist 'type event) "m.room.member")
+                              (equal (gomuks--alist 'room_id event) id))
+                     (puthash (gomuks--alist 'rowid event) event gomuks--events)
+                     (unless (gethash (gomuks--alist 'state_key event) state)
+                       (puthash (gomuks--alist 'state_key event)
+                                (gomuks--alist 'rowid event) state))))
+                 (puthash id state gomuks--member-state)
+                 (gomuks--render-room id))))))))))
 
 (defun gomuks--echo-area-notifications-p ()
   "Return non-nil when incoming messages should appear in the echo area."
@@ -295,7 +329,7 @@ Remove the quoted reply fallback for EVENT before rendering."
            'action (lambda (_button) (gomuks-open-attachment event)))
           (insert "\n"))
       (insert "    " (propertize (format "[%s]" (upcase (string-remove-prefix "m." kind)))
-                                  'face 'gomuks-heading-face)
+                                 'face 'gomuks-heading-face)
               " " (propertize name 'face 'gomuks-room-face))
       (when (numberp size)
         (insert "  " (propertize (file-size-human-readable size) 'face 'shadow)))
@@ -309,7 +343,7 @@ Remove the quoted reply fallback for EVENT before rendering."
       (when (and cached (display-images-p) (equal kind "m.image"))
         (condition-case nil
             (when-let* ((image (create-image cached nil nil
-                                            :max-width 360 :max-height 220)))
+                                             :max-width 360 :max-height 220)))
               (insert "    ")
               (insert-image image "[image preview]")
               (insert "\n"))
@@ -457,11 +491,11 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
         (setq-local header-line-format (gomuks--room-header id))
         (erase-buffer)
         (insert (propertize (if (bound-and-true-p evil-mode)
-                                       "i" "C-c C-s")
-                                   'face 'help-key-binding)
+                                "i" "C-c C-s")
+                            'face 'help-key-binding)
                 " compose   " (propertize (if (bound-and-true-p evil-mode)
-                                             "p" "M-p")
-                                         'face 'help-key-binding)
+                                              "p" "M-p")
+                                          'face 'help-key-binding)
                 " older   " (propertize "C-k" 'face 'help-key-binding)
                 " switch   " (propertize "b" 'face 'help-key-binding)
                 " home   " (propertize "o" 'face 'help-key-binding)
@@ -554,7 +588,8 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                                     for item = (gethash rowid gomuks--events)
                                     when (gomuks--alist 'event_id item)
                                     return item))
-                    (event-id (gomuks--alist 'event_id event)))
+                    (event-id (gomuks--alist 'event_id event))
+                    (generation (gomuks--cache-token id)))
           (unless (equal event-id (gethash id gomuks--last-read))
             (puthash id event-id gomuks--last-read)
             (gomuks--post
@@ -562,7 +597,7 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
              `((room_id . ,id) (event_id . ,event-id)
                (receipt_type . "m.read"))
              (lambda (failure _response)
-               (when failure
+               (when (and failure (gomuks--cache-current-p id generation))
                  (when (equal event-id (gethash id gomuks--last-read))
                    (remhash id gomuks--last-read))
                  (message "gomuks: read receipt failed: %s" failure))))))))))
@@ -615,20 +650,22 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
   "Toggle Matrix push notifications for the room at point or in this buffer."
   (interactive)
   (let* ((id (or gomuks--room-id (get-text-property (point) 'gomuks-room-id)))
-         (muted (and id (gethash id gomuks--muted-rooms))))
+         (muted (and id (gethash id gomuks--muted-rooms)))
+         (generation (gomuks--cache-token id)))
     (unless id (user-error "No room selected"))
     (gomuks--post
      "mute_room" `((room_id . ,id) (muted . ,(if muted :false t)))
      (lambda (failure _response)
-       (if failure
-           (message "gomuks: could not %s %s: %s"
-                    (if muted "unmute" "mute") (gomuks--room-name id) failure)
-         (if muted (remhash id gomuks--muted-rooms)
-           (puthash id t gomuks--muted-rooms))
-         (gomuks--render-rooms)
-         (gomuks--render-room id)
-         (message "gomuks: %s %s"
-                  (if muted "unmuted" "muted") (gomuks--room-name id)))))))
+       (when (gomuks--cache-current-p id generation)
+         (if failure
+             (message "gomuks: could not %s %s: %s"
+                      (if muted "unmute" "mute") (gomuks--room-name id) failure)
+           (if muted (remhash id gomuks--muted-rooms)
+             (puthash id t gomuks--muted-rooms))
+           (gomuks--render-rooms)
+           (gomuks--render-room id)
+           (message "gomuks: %s %s"
+                    (if muted "unmuted" "muted") (gomuks--room-name id))))))))
 
 (defun gomuks--switch-room (hidden)
   "Choose a cached room and open it, selecting HIDDEN rooms when non-nil."
@@ -650,7 +687,7 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                              (name (replace-regexp-in-string
                                     "[\n\r]+" " " (gomuks--room-name id)))
                              (unread (or (gomuks--alist 'unread_notifications
-                                                       (cdr room)) 0)))
+                                                        (cdr room)) 0)))
                         (cons (format "%s%s  %s" name
                                       (if (> unread 0) (format " (%d)" unread) "")
                                       id)
@@ -707,7 +744,7 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
   (let ((position (point-min)) found)
     (while (and (< position (point-max)) (not found))
       (when (equal (gomuks--alist 'event_id
-                                 (get-text-property position 'gomuks-event))
+                                  (get-text-property position 'gomuks-event))
                    event-id)
         (setq found position))
       (setq position (or (next-single-property-change
@@ -743,8 +780,10 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
   (unless target (user-error "This message is not a reply"))
   (let* ((id gomuks--room-id)
          (source (current-buffer))
+         (view (gomuks--view-identity))
          (room (get-buffer (format "*Gomuks: %s*" id)))
          (current-position (gomuks--event-id-position target))
+         (generation (gomuks--cache-token id))
          (room-position (and room
                              (with-current-buffer room
                                (gomuks--event-id-position target)))))
@@ -760,21 +799,25 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
       (gomuks--post
        "get_event_context" `((room_id . ,id) (event_id . ,target) (limit . 12))
        (lambda (failure response)
-         (if failure
-             (gomuks--post
-              "get_event" `((room_id . ,id) (event_id . ,target))
-              (lambda (event-failure event)
-                (if event-failure
-                    (message "gomuks: could not follow reply: %s" event-failure)
-                  (gomuks--show-reply-context id target source (list event)))))
-           (dolist (event (gomuks--alist 'related_events response))
-             (when-let* ((rowid (gomuks--alist 'rowid event)))
-               (puthash rowid event gomuks--events)))
-           (gomuks--show-reply-context
-            id target source
-            (append (reverse (gomuks--alist 'before response))
-                    (list (gomuks--alist 'event response))
-                    (gomuks--alist 'after response))))))))))
+         (when (and (gomuks--cache-current-p id generation)
+                    (gomuks--view-current-p source view))
+           (if failure
+               (gomuks--post
+                "get_event" `((room_id . ,id) (event_id . ,target))
+                (lambda (event-failure event)
+                  (when (and (gomuks--cache-current-p id generation)
+                             (gomuks--view-current-p source view))
+                    (if event-failure
+                        (message "gomuks: could not follow reply: %s" event-failure)
+                      (gomuks--show-reply-context id target source (list event))))))
+             (dolist (event (gomuks--alist 'related_events response))
+               (when-let* ((rowid (gomuks--alist 'rowid event)))
+                 (puthash rowid event gomuks--events)))
+             (gomuks--show-reply-context
+              id target source
+              (append (reverse (gomuks--alist 'before response))
+                      (list (gomuks--alist 'event response))
+                      (gomuks--alist 'after response)))))))))))
 
 (defun gomuks--render-search ()
   "Redraw the current search buffer from its result events."
@@ -825,6 +868,7 @@ When MORE is non-nil, use the saved pagination token."
              (id gomuks--room-id)
              (query gomuks--search-query)
              (generation gomuks--search-generation)
+             (cache-token (gomuks--cache-token id))
              (token (and more gomuks--search-next-batch)))
         (setq gomuks--search-loading t)
         (setq gomuks--search-error nil)
@@ -835,9 +879,12 @@ When MORE is non-nil, use the saved pagination token."
                    (limit . 50) (sort_by_time . t))
                  (when token `((next_batch . ,token))))
          (lambda (failure response)
-           (when (buffer-live-p buffer)
+           (when (and (gomuks--cache-current-p id cache-token)
+                      (buffer-live-p buffer))
              (with-current-buffer buffer
-               (when (= generation gomuks--search-generation)
+               (when (and (derived-mode-p 'gomuks-search-mode)
+                          (equal id gomuks--room-id)
+                          (= generation gomuks--search-generation))
                  (setq gomuks--search-loading nil)
                  (if failure
                      (setq gomuks--search-error failure)
@@ -858,8 +905,9 @@ When MORE is non-nil, use the saved pagination token."
   "Search the backend's local history for messages in this room."
   (interactive)
   (unless gomuks--room-id (user-error "Open a room first"))
-  (let ((query (string-trim (read-string "Search room: ")))
-        (source (current-buffer))
+  (let ((query (string-trim (read-string "Search room: " nil nil gomuks--search-query)))
+        (source (if (derived-mode-p 'gomuks-search-mode)
+                    gomuks--parent-buffer (current-buffer)))
         (id gomuks--room-id))
     (when (string-empty-p query) (user-error "Search query is empty"))
     (let ((buffer (get-buffer-create (format "*Gomuks search: %s*" id))))
@@ -890,21 +938,25 @@ When MORE is non-nil, use the saved pagination token."
   (let* ((event (gomuks--event-at-point))
          (id gomuks--room-id)
          (target (gomuks--alist 'event_id event))
+         (generation (gomuks--cache-token id))
+         (view (gomuks--view-identity))
          (source (current-buffer)))
     (unless target (user-error "This search result has no event ID"))
     (gomuks--post
      "get_event_context" `((room_id . ,id) (event_id . ,target) (limit . 12))
      (lambda (failure response)
-       (if failure
-           (gomuks--show-reply-context id target source (list event))
-         (dolist (related (gomuks--alist 'related_events response))
-           (when-let* ((rowid (gomuks--alist 'rowid related)))
-             (puthash rowid related gomuks--events)))
-         (gomuks--show-reply-context
-          id target source
-          (append (reverse (gomuks--alist 'before response))
-                  (list (gomuks--alist 'event response))
-                  (gomuks--alist 'after response))))))))
+       (when (and (gomuks--cache-current-p id generation)
+                  (gomuks--view-current-p source view))
+         (if failure
+             (gomuks--show-reply-context id target source (list event))
+           (dolist (related (gomuks--alist 'related_events response))
+             (when-let* ((rowid (gomuks--alist 'rowid related)))
+               (puthash rowid related gomuks--events)))
+           (gomuks--show-reply-context
+            id target source
+            (append (reverse (gomuks--alist 'before response))
+                    (list (gomuks--alist 'event response))
+                    (gomuks--alist 'after response)))))))))
 
 (defun gomuks-search-back ()
   "Return from search results to the room that opened them."
@@ -934,7 +986,7 @@ When MORE is non-nil, use the saved pagination token."
      "send_event"
      `((room_id . ,gomuks--room-id) (type . "m.reaction")
        (content . ((m.relates_to . ((rel_type . "m.annotation")
-                                      (event_id . ,event-id) (key . ,key))))))
+                                    (event_id . ,event-id) (key . ,key))))))
      (lambda (failure _response)
        (message "gomuks: %s" (or failure "reaction queued"))))))
 
@@ -952,6 +1004,8 @@ When MORE is non-nil, use the saved pagination token."
         (sender (get-text-property (point) 'gomuks-reaction-sender))
         (room-id gomuks--room-id)
         (buffer (current-buffer))
+        (generation (gomuks--cache-token gomuks--room-id))
+        (view (gomuks--view-identity))
         (event gomuks--reactions-event)
         (key gomuks--reactions-key))
     (unless event-id (user-error "No reaction on this line"))
@@ -961,16 +1015,20 @@ When MORE is non-nil, use the saved pagination token."
       (gomuks--post
        "redact_event" `((room_id . ,room-id) (event_id . ,event-id))
        (lambda (failure _response)
-         (if failure
-             (message "gomuks: could not remove reaction: %s" failure)
-           (when (and event key (buffer-live-p buffer))
-             (with-current-buffer buffer
-               (gomuks-show-reactions event key)))))))))
+         (when (and (gomuks--cache-current-p room-id generation)
+                    (gomuks--view-current-p buffer view))
+           (if failure
+               (message "gomuks: could not remove reaction: %s" failure)
+             (when (and event key (buffer-live-p buffer))
+               (with-current-buffer buffer
+		 (gomuks-show-reactions event key))))))))))
 
 (defun gomuks-show-reactions (event key)
   "Show the people who reacted to EVENT with KEY."
   (let* ((id gomuks--room-id)
          (event-id (gomuks--alist 'event_id event))
+         (generation (gomuks--cache-token id))
+         view
          (buffer (get-buffer-create
                   (format "*Gomuks reactions: %s %s*" event-id key))))
     (unless event-id (user-error "This message has no event ID yet"))
@@ -979,6 +1037,7 @@ When MORE is non-nil, use the saved pagination token."
       (setq-local gomuks--room-id id
                   gomuks--reactions-event event
                   gomuks--reactions-key key)
+      (setq view (gomuks--view-identity))
       (setq-local header-line-format
                   (concat " " (gomuks--room-name id) "  ·  " key
                           " reactions  ·  d remove yours  ·  q close"))
@@ -995,7 +1054,8 @@ When MORE is non-nil, use the saved pagination token."
               `((room_id . ,id) (event_id . ,event-id)
                 (relation_type . "m.annotation"))
               (lambda (failure response)
-                (when (buffer-live-p buffer)
+                (when (and (gomuks--cache-current-p id generation)
+                           (gomuks--view-current-p buffer view))
                   (with-current-buffer buffer
                     (let ((inhibit-read-only t)
                           (seen (make-hash-table :test 'equal))
@@ -1035,8 +1095,11 @@ When MORE is non-nil, use the saved pagination token."
         (gomuks--post
          "get_state" '()
          (lambda (_failure state)
-           (setq gomuks--user-id (gomuks--alist 'user_id state))
-           (funcall load)))))))
+           (when (and (gomuks--cache-current-p id generation)
+                      (gomuks--view-current-p buffer view))
+             (unless gomuks--user-id
+               (setq gomuks--user-id (gomuks--alist 'user_id state)))
+             (funcall load))))))))
 
 (defun gomuks-redact ()
   "Redact the message at point after confirmation."
@@ -1065,62 +1128,67 @@ When MORE is non-nil, use the saved pagination token."
   (interactive)
   (unless gomuks--room-id (user-error "Open a room first"))
   (catch 'gomuks-history-done
-  (when gomuks--thread-root
-    (if (not gomuks--thread-next-batch)
-        (message "gomuks: no older thread messages")
-      (let ((buffer (current-buffer))
-            (id gomuks--room-id)
-            (root gomuks--thread-root)
-            (token gomuks--thread-next-batch))
-        (gomuks--post
-         "paginate_manual"
-         `((room_id . ,id) (thread_root . ,root) (since . ,token)
-           (direction . "b") (limit . 50))
-         (lambda (failure response)
-           (if failure (message "gomuks: %s" failure)
-             (when (buffer-live-p buffer)
-               (with-current-buffer buffer
-                 (dolist (event (gomuks--alist 'events response))
-                   (when-let* ((rowid (gomuks--alist 'rowid event)))
-                     (puthash rowid event gomuks--events)))
-                 (setq gomuks--thread-events
-                       (gomuks--merge-thread-events
-                        gomuks--thread-root gomuks--thread-events
-                        (gomuks--alist 'events response))
-                       gomuks--thread-next-batch
-                       (let ((next (gomuks--alist 'next_batch response)))
-                         (unless (string-empty-p (or next "")) next)))
-                 (gomuks--render-room id))))))))
-    (throw 'gomuks-history-done nil))
-  (let* ((id gomuks--room-id)
-         (buffer (current-buffer))
-         (oldest (car (gethash id gomuks--timelines))))
-    (gomuks--post
-     "paginate" `((room_id . ,id)
-                  (max_timeline_id . ,(or (gethash oldest gomuks--timeline-ids) 0))
-                  (limit . 50))
-     (lambda (failure response)
-       (if failure
-           (progn
-             (when (buffer-live-p buffer)
-               (with-current-buffer buffer
-                 (setq gomuks--initial-history-requested nil)))
-             (message "gomuks: %s" failure))
-         (let ((new-rows nil))
-           (dolist (event (gomuks--alist 'events response))
-             (let ((rowid (gomuks--alist 'rowid event)))
-               (puthash rowid event gomuks--events)
-               (puthash rowid (gomuks--alist 'timeline_rowid event)
-                        gomuks--timeline-ids)
-               (when (and (gomuks--alist 'timeline_rowid event)
-                          (not (member rowid (gethash id gomuks--timelines))))
-                 (push rowid new-rows))))
-           (puthash id (append new-rows (gethash id gomuks--timelines))
-                    gomuks--timelines)
-           (when (buffer-live-p buffer)
-             (with-current-buffer buffer (gomuks--render-room id)))
-           (gomuks--maybe-mark-read)
-           (message "gomuks: loaded %d older messages" (length new-rows)))))))))
+    (when gomuks--thread-root
+      (if (not gomuks--thread-next-batch)
+          (message "gomuks: no older thread messages")
+        (let ((buffer (current-buffer))
+              (id gomuks--room-id)
+              (view (gomuks--view-identity))
+              (root gomuks--thread-root)
+              (generation (gomuks--cache-token gomuks--room-id))
+              (token gomuks--thread-next-batch))
+          (gomuks--post
+           "paginate_manual"
+           `((room_id . ,id) (thread_root . ,root) (since . ,token)
+             (direction . "b") (limit . 50))
+           (lambda (failure response)
+             (when (and (gomuks--cache-current-p id generation)
+                        (gomuks--view-current-p buffer view))
+               (if failure (message "gomuks: %s" failure)
+                 (with-current-buffer buffer
+                   (dolist (event (gomuks--alist 'events response))
+                     (when-let* ((rowid (gomuks--alist 'rowid event)))
+                       (puthash rowid event gomuks--events)))
+                   (setq gomuks--thread-events
+                         (gomuks--merge-thread-events
+                          gomuks--thread-root gomuks--thread-events
+                          (gomuks--alist 'events response))
+                         gomuks--thread-next-batch
+                         (let ((next (gomuks--alist 'next_batch response)))
+                           (unless (string-empty-p (or next "")) next)))
+                   (gomuks--render-room id))))))))
+      (throw 'gomuks-history-done nil))
+    (let* ((id gomuks--room-id)
+           (buffer (current-buffer))
+           (view (gomuks--view-identity))
+           (generation (gomuks--cache-token id))
+           (oldest (car (gethash id gomuks--timelines))))
+      (gomuks--post
+       "paginate" `((room_id . ,id)
+                    (max_timeline_id . ,(or (gethash oldest gomuks--timeline-ids) 0))
+                    (limit . 50))
+       (lambda (failure response)
+         (when (and (gomuks--cache-current-p id generation)
+                    (gomuks--view-current-p buffer view))
+           (if failure
+               (progn
+                 (with-current-buffer buffer
+                   (setq gomuks--initial-history-requested nil))
+                 (message "gomuks: %s" failure))
+             (let ((new-rows nil))
+               (dolist (event (gomuks--alist 'events response))
+                 (let ((rowid (gomuks--alist 'rowid event)))
+                   (puthash rowid event gomuks--events)
+                   (puthash rowid (gomuks--alist 'timeline_rowid event)
+                            gomuks--timeline-ids)
+                   (when (and (gomuks--alist 'timeline_rowid event)
+                              (not (member rowid (gethash id gomuks--timelines))))
+                     (push rowid new-rows))))
+               (puthash id (append new-rows (gethash id gomuks--timelines))
+                        gomuks--timelines)
+               (with-current-buffer buffer (gomuks--render-room id))
+               (gomuks--maybe-mark-read)
+               (message "gomuks: loaded %d older messages" (length new-rows))))))))))
 
 (defun gomuks-open-thread (&optional event)
   "Open the thread containing EVENT, or the message at point."
@@ -1129,11 +1197,15 @@ When MORE is non-nil, use the saved pagination token."
          (event (or event (gomuks--event-at-point)))
          (root (gomuks--thread-root-id event))
          (id gomuks--room-id)
+         (generation (gomuks--cache-token id))
+         (view nil)
          (root-event (if (equal root (gomuks--alist 'event_id event))
                          event (gomuks--find-event id root)))
          (buffer (get-buffer-create (format "*Gomuks thread: %s*" root)))
          (existing (with-current-buffer buffer
-                     (equal gomuks--thread-root root))))
+                     (and (equal gomuks--room-id id)
+                          (equal gomuks--thread-root root)
+                          gomuks--initial-history-requested))))
     (unless root (user-error "This message has no event ID yet"))
     (with-current-buffer buffer
       (unless (derived-mode-p 'gomuks-room-mode)
@@ -1147,16 +1219,19 @@ When MORE is non-nil, use the saved pagination token."
              root (and existing gomuks--thread-events)
              (if root-event (list root-event) nil)))
       (unless existing
-        (setq gomuks--thread-next-batch nil)))
+        (setq gomuks--thread-next-batch nil
+              gomuks--initial-history-requested t))
+      (setq view (gomuks--view-identity)))
     (gomuks--render-buffer buffer id)
     (gomuks--show-room buffer)
     (unless root-event
       (gomuks--post
        "get_event" `((room_id . ,id) (event_id . ,root))
        (lambda (failure fetched)
-         (if failure
-             (message "gomuks: thread root unavailable: %s" failure)
-           (when (buffer-live-p buffer)
+         (when (and (gomuks--cache-current-p id generation)
+                    (gomuks--view-current-p buffer view))
+           (if failure
+               (message "gomuks: thread root unavailable: %s" failure)
              (with-current-buffer buffer
                (when-let* ((rowid (gomuks--alist 'rowid fetched)))
                  (puthash rowid fetched gomuks--events))
@@ -1169,8 +1244,12 @@ When MORE is non-nil, use the saved pagination token."
        "paginate_manual"
        `((room_id . ,id) (thread_root . ,root) (direction . "b") (limit . 50))
        (lambda (failure response)
-         (if failure (message "gomuks: %s" failure)
-           (when (buffer-live-p buffer)
+         (when (and (gomuks--cache-current-p id generation)
+                    (gomuks--view-current-p buffer view))
+           (if failure
+               (progn
+                 (with-current-buffer buffer (setq gomuks--initial-history-requested nil))
+                 (message "gomuks: %s" failure))
              (with-current-buffer buffer
                (dolist (event (gomuks--alist 'events response))
                  (when-let* ((rowid (gomuks--alist 'rowid event)))

@@ -61,7 +61,9 @@ With prefix argument CHANGE-CREDENTIALS, ask for a new username too."
   (when change-credentials
     (setq gomuks-username nil gomuks--skip-auth-source t))
   (clrhash gomuks--media-failures)
-  (gomuks--reset)
+  (setq gomuks--user-id nil)
+  (gomuks--reset-cache)
+  (gomuks--reset-views)
   (gomuks))
 
 (defun gomuks-change-credentials ()

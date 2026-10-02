@@ -102,26 +102,28 @@
 (defun gomuks--request-mention-members (id)
   "Load the member list for room ID once for composer completion."
   (when (and id (not (gethash id gomuks--mention-members-loaded)))
-    (puthash id 'loading gomuks--mention-members-loaded)
-    (gomuks--post
-     "get_room_state"
-     (append `((room_id . ,id) (include_members . t))
-             (unless (gomuks--alist 'has_member_list
-                                    (gethash id gomuks--rooms))
-               '((fetch_members . t))))
-     (lambda (failure events)
-       (if failure
-           (remhash id gomuks--mention-members-loaded)
-         (let ((state (or (gethash id gomuks--member-state)
-                          (make-hash-table :test 'equal))))
-           (dolist (event events)
-             (when (and (equal (gomuks--alist 'type event) "m.room.member")
-                        (equal (gomuks--alist 'room_id event) id))
-               (puthash (gomuks--alist 'rowid event) event gomuks--events)
-               (puthash (gomuks--alist 'state_key event)
-                        (gomuks--alist 'rowid event) state)))
-           (puthash id state gomuks--member-state)
-           (puthash id t gomuks--mention-members-loaded)))))))
+    (let ((generation (gomuks--cache-token id)))
+      (puthash id 'loading gomuks--mention-members-loaded)
+      (gomuks--post
+       "get_room_state"
+       (append `((room_id . ,id) (include_members . t))
+               (unless (gomuks--alist 'has_member_list
+                                      (gethash id gomuks--rooms))
+                 '((fetch_members . t))))
+       (lambda (failure events)
+         (when (gomuks--cache-current-p id generation)
+           (if failure
+               (remhash id gomuks--mention-members-loaded)
+             (let ((state (or (gethash id gomuks--member-state)
+                              (make-hash-table :test 'equal))))
+               (dolist (event events)
+                 (when (and (equal (gomuks--alist 'type event) "m.room.member")
+                            (equal (gomuks--alist 'room_id event) id))
+                   (puthash (gomuks--alist 'rowid event) event gomuks--events)
+                   (puthash (gomuks--alist 'state_key event)
+                            (gomuks--alist 'rowid event) state)))
+               (puthash id state gomuks--member-state)
+               (puthash id t gomuks--mention-members-loaded)))))))))
 
 (defun gomuks--mention-capf ()
   "Complete an @name in the composer with a room member."
@@ -190,9 +192,9 @@
   (let ((attachments (gomuks--pending-attachments)))
     (setq header-line-format
           (concat " " (or gomuks--compose-context
-                           (and gomuks--room-id
-                                (gomuks--room-name gomuks--room-id))
-                           "Compose a message")
+                          (and gomuks--room-id
+                               (gomuks--room-name gomuks--room-id))
+                          "Compose a message")
                   "  •  C-c C-c send  •  C-c C-a attach"
                   (when attachments
                     (format "  •  %s [C-c C-o preview, C-c C-d remove]"
@@ -287,7 +289,7 @@ LABEL is shown in the composer header."
         (erase-buffer)
         (insert (format "%s\n\n" (nth 2 attachment)))
         (if-let* ((image (and (display-images-p)
-                             (ignore-errors (create-image file)))))
+                              (ignore-errors (create-image file)))))
             (insert-image image "[image preview]")
           (insert (format "Inline preview unavailable here. Press RET to open %s\n"
                           file)))
@@ -445,9 +447,9 @@ Use ID and RELATION for every attachment event."
   (let ((event-id (gomuks--alist 'event_id (gomuks--event-at-point))))
     (unless event-id (user-error "This message has no event ID yet"))
     (let ((relation (append (when gomuks--thread-root
-                             `((rel_type . "m.thread")
-                               (event_id . ,gomuks--thread-root)))
-                           `((m.in_reply_to . ((event_id . ,event-id)))))))
+                              `((rel_type . "m.thread")
+                                (event_id . ,gomuks--thread-root)))
+                            `((m.in_reply_to . ((event_id . ,event-id)))))))
       (if text
           (gomuks--send-related text relation)
         (gomuks--show-composer
@@ -519,9 +521,9 @@ When DELETE-AFTER-UPLOAD is non-nil, remove FILE when it is no longer needed."
     (user-error "Image paste needs a graphical Emacs frame"))
   (let ((image
          (cl-loop for (type . suffix) in '((image/png . ".png")
-                                          (image/jpeg . ".jpg")
-                                          (image/webp . ".webp")
-                                          (image/gif . ".gif"))
+                                           (image/jpeg . ".jpg")
+                                           (image/webp . ".webp")
+                                           (image/gif . ".gif"))
                   for data = (condition-case nil
                                  (gui-get-selection 'CLIPBOARD type)
                                (error nil))
