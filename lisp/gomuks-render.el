@@ -61,7 +61,7 @@
                 "     " (propertize status
                                     'face (if (string= status "Connected")
                                               'success 'shadow))
-                "\n  " (propertize "Matrix in Emacs" 'face 'shadow)
+                "\n  " (propertize "Gomacs? Emuks?" 'face 'shadow)
                 "\n\n  " (propertize "HOME" 'face 'gomuks-heading-face)
                 (format "     %d rooms  ·  %d unread\n" (length entries) unread-total)
                 "  " (propertize "RET" 'face 'help-key-binding)
