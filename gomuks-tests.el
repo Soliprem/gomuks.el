@@ -1613,7 +1613,7 @@ boundaries; the thread commands and their callbacks run normally."
                                '("$root") '("$root" "$reply"))))
             (should (equal gomuks--thread-next-batch
                            (unless (eq kind 'missing-root) "next-page")))
-            (when (eq kind 'initial-page)
+            (unless (eq kind 'missing-root)
               (should (gethash 43 gomuks--events)))
             (should (equal effects '(render)))))))))
 
@@ -2264,6 +2264,102 @@ functions that start another request and read its current pending marker."
               (should (functionp callback)))
           (kill-buffer search)
           (kill-buffer parent))))))
+
+(ert-deftest gomuks-stream-ingestion-replaces-events-with-identified-rows ()
+  (dolist (command '("sync_complete" "events_decrypted"))
+    (ert-info ((format "Stream command: %s" command))
+      (gomuks-test-with-state
+        (let* ((old '((rowid . 42) (event_id . "$message") (encrypted . t)))
+               (fresh '((rowid . 42) (event_id . "$message")
+                        (content . ((body . "Decrypted message")))))
+               (events (list fresh '((event_id . "$unidentified"))
+                             '((rowid . 0) (event_id . "$zero")))))
+          (puthash 42 old gomuks--events)
+          (gomuks--handle-event
+           `((command . ,command)
+             (data . ,(if (equal command "sync_complete")
+                          `((rooms . (("!room:test" . ((events . ,events))))))
+                        `((room_id . "!room:test") (events . ,events))))))
+          ;; A complete replacement must not retain fields from the encrypted row.
+          (should (equal (gethash 42 gomuks--events) fresh))
+          (should-not (gomuks--alist 'encrypted (gethash 42 gomuks--events)))
+          (should (equal (gomuks--alist 'event_id (gethash 0 gomuks--events)) "$zero"))
+          (should-not (gethash nil gomuks--events))
+          (should (= (hash-table-count gomuks--events) 2)))))))
+
+(ert-deftest gomuks-event-writer-preserves-feature-state-and-starts-no-effects ()
+  (gomuks-test-with-state
+    (puthash "!room:test" '(42) gomuks--timelines)
+    (puthash 42 142 gomuks--timeline-ids)
+    (puthash "!room:test" 'loading gomuks--mention-members-loaded)
+    (let ((token (gomuks--cache-token "!room:test"))
+          (members (make-hash-table :test 'equal)))
+      (puthash "@sender:test" 99 members)
+      (puthash "!room:test" members gomuks--member-state)
+      (with-temp-buffer
+        (insert "Keep this buffer")
+        (cl-letf (((symbol-function 'gomuks--post)
+                   (lambda (&rest _) (ert-fail "An event writer started a request")))
+                  ((symbol-function 'gomuks--render-room)
+                   (lambda (&rest _) (ert-fail "An event writer rendered a room")))
+                  ((symbol-function 'gomuks--render-rooms)
+                   (lambda (&rest _) (ert-fail "An event writer rendered the home page"))))
+          (gomuks--store-events
+           '(((rowid . 42) (content . ((body . "Latest message"))))
+             ((rowid . 99) (type . "m.room.member") (state_key . "@new:test")))))
+        (should (equal (buffer-string) "Keep this buffer")))
+      (should (gethash 42 gomuks--events))
+      (should (gethash 99 gomuks--events))
+      (should (equal (gethash "!room:test" gomuks--timelines) '(42)))
+      (should (= (gethash 42 gomuks--timeline-ids) 142))
+      (should (eq (gethash "!room:test" gomuks--member-state) members))
+      (should (= (hash-table-count members) 1))
+      (should (= (gethash "@sender:test" members) 99))
+      (should (eq (gethash "!room:test" gomuks--mention-members-loaded) 'loading))
+      (should (gomuks--cache-current-p "!room:test" token)))))
+
+(ert-deftest gomuks-history-stores-related-events-without-adding-them-to-timeline ()
+  (gomuks-test-with-state
+    (with-temp-buffer
+      (gomuks-room-mode)
+      (setq gomuks--room-id "!room:test")
+      (let (callback)
+        (cl-letf (((symbol-function 'gomuks--post)
+                   (lambda (_command _data completion) (setq callback completion))))
+          (gomuks-load-history))
+        (cl-letf (((symbol-function 'message) #'ignore))
+          (funcall callback nil
+                   '((events . (((rowid . 42) (timeline_rowid . 142))
+                                ((event_id . "$unidentified") (timeline_rowid . 143))))
+                     (related_events . (((rowid . 99) (event_id . "$parent")
+                                         (timeline_rowid . 199)))))))
+        (should (gethash 42 gomuks--events))
+        (should (equal (gomuks--alist 'event_id (gethash 99 gomuks--events)) "$parent"))
+        (should (= (hash-table-count gomuks--events) 2))
+        (should (equal (gethash "!room:test" gomuks--timelines) '(42)))
+        (should (= (gethash 42 gomuks--timeline-ids) 142))
+        (should-not (gethash 99 gomuks--timeline-ids))
+        (should-not (gethash nil gomuks--timeline-ids))))))
+
+(ert-deftest gomuks-member-ingestion-requires-an-identified-row ()
+  (dolist (kind '(missing mentions))
+    (gomuks-test-with-member-request kind
+      (setq response
+            (append response
+                    '(((room_id . "!members:test") (type . "m.room.member")
+                       (state_key . "@unidentified:test"))
+                      ((rowid . 0) (room_id . "!members:test") (type . "m.room.member")
+                       (state_key . "@zero:test")))))
+      (funcall callback nil response)
+      (let ((members (gethash "!members:test" gomuks--member-state)))
+        (should (= (hash-table-count gomuks--events) 2))
+        (should (gethash 0 gomuks--events))
+        (should (gethash 42 gomuks--events))
+        (should (= (hash-table-count members) 2))
+        (should (= (gethash "@zero:test" members) 0))
+        (should (= (gethash "@a:test" members) 42))
+        (should (eq (gethash "@unidentified:test" members 'absent) 'absent))
+        (should-not (gethash nil gomuks--events))))))
 
 (provide 'gomuks-tests)
 ;;; gomuks-tests.el ends here

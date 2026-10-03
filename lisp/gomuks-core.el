@@ -170,6 +170,13 @@ The default shows them only while a Gomuks buffer is selected."
         gomuks--timeline-ids (make-hash-table :test 'equal)
         gomuks--last-read (make-hash-table :test 'equal)))
 
+(defun gomuks--store-events (events)
+  "Store EVENTS by row ID, replacing previous event objects.
+Skip events without a row ID.  Update only the event cache."
+  (dolist (event events)
+    (when-let* ((rowid (gomuks--alist 'rowid event)))
+      (puthash rowid event gomuks--events))))
+
 (defun gomuks--cache-token (room-id)
   "Return the current cache and room generations for ROOM-ID."
   (cons gomuks--cache-generation (gethash room-id gomuks--room-generations 0)))

@@ -236,8 +236,9 @@ Remove the quoted reply fallback for EVENT before rendering."
                                 (make-hash-table :test 'equal))))
                  (dolist (event response)
                    (when (and (equal (gomuks--alist 'type event) "m.room.member")
-                              (equal (gomuks--alist 'room_id event) id))
-                     (puthash (gomuks--alist 'rowid event) event gomuks--events)
+                              (equal (gomuks--alist 'room_id event) id)
+                              (gomuks--alist 'rowid event))
+                     (gomuks--store-events (list event))
                      (unless (gethash (gomuks--alist 'state_key event) state)
                        (puthash (gomuks--alist 'state_key event)
                                 (gomuks--alist 'rowid event) state))))
@@ -755,9 +756,7 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
 (defun gomuks--show-reply-context (id target source events)
   "Show EVENTS around TARGET in room ID, returning to SOURCE with `b'."
   (let ((buffer (get-buffer-create (format "*Gomuks context: %s*" target))))
-    (dolist (event events)
-      (when-let* ((rowid (gomuks--alist 'rowid event)))
-        (puthash rowid event gomuks--events)))
+    (gomuks--store-events events)
     (with-current-buffer buffer
       (unless (derived-mode-p 'gomuks-room-mode)
         (gomuks-room-mode))
@@ -810,9 +809,7 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                     (if event-failure
                         (message "gomuks: could not follow reply: %s" event-failure)
                       (gomuks--show-reply-context id target source (list event))))))
-             (dolist (event (gomuks--alist 'related_events response))
-               (when-let* ((rowid (gomuks--alist 'rowid event)))
-                 (puthash rowid event gomuks--events)))
+             (gomuks--store-events (gomuks--alist 'related_events response))
              (gomuks--show-reply-context
               id target source
               (append (reverse (gomuks--alist 'before response))
@@ -896,9 +893,7 @@ When MORE is non-nil, use the saved pagination token."
                          gomuks--search-next-batch
                          (let ((next (gomuks--alist 'next_batch response)))
                            (unless (string-empty-p (or next "")) next)))
-                   (dolist (event (gomuks--alist 'events response))
-                     (when-let* ((rowid (gomuks--alist 'rowid event)))
-                       (puthash rowid event gomuks--events))))
+                   (gomuks--store-events (gomuks--alist 'events response)))
                  (gomuks--render-search))))))))))
 
 (defun gomuks-search ()
@@ -949,9 +944,7 @@ When MORE is non-nil, use the saved pagination token."
                   (gomuks--view-current-p source view))
          (if failure
              (gomuks--show-reply-context id target source (list event))
-           (dolist (related (gomuks--alist 'related_events response))
-             (when-let* ((rowid (gomuks--alist 'rowid related)))
-               (puthash rowid related gomuks--events)))
+           (gomuks--store-events (gomuks--alist 'related_events response))
            (gomuks--show-reply-context
             id target source
             (append (reverse (gomuks--alist 'before response))
@@ -1146,9 +1139,9 @@ When MORE is non-nil, use the saved pagination token."
                         (gomuks--view-current-p buffer view))
                (if failure (message "gomuks: %s" failure)
                  (with-current-buffer buffer
-                   (dolist (event (gomuks--alist 'events response))
-                     (when-let* ((rowid (gomuks--alist 'rowid event)))
-                       (puthash rowid event gomuks--events)))
+                   (gomuks--store-events
+                    (append (gomuks--alist 'events response)
+                            (gomuks--alist 'related_events response)))
                    (setq gomuks--thread-events
                          (gomuks--merge-thread-events
                           gomuks--thread-root gomuks--thread-events
@@ -1176,9 +1169,11 @@ When MORE is non-nil, use the saved pagination token."
                    (setq gomuks--initial-history-requested nil))
                  (message "gomuks: %s" failure))
              (let ((new-rows nil))
+               (gomuks--store-events
+                (append (gomuks--alist 'events response)
+                        (gomuks--alist 'related_events response)))
                (dolist (event (gomuks--alist 'events response))
-                 (let ((rowid (gomuks--alist 'rowid event)))
-                   (puthash rowid event gomuks--events)
+                 (when-let* ((rowid (gomuks--alist 'rowid event)))
                    (puthash rowid (gomuks--alist 'timeline_rowid event)
                             gomuks--timeline-ids)
                    (when (and (gomuks--alist 'timeline_rowid event)
@@ -1233,8 +1228,7 @@ When MORE is non-nil, use the saved pagination token."
            (if failure
                (message "gomuks: thread root unavailable: %s" failure)
              (with-current-buffer buffer
-               (when-let* ((rowid (gomuks--alist 'rowid fetched)))
-                 (puthash rowid fetched gomuks--events))
+               (gomuks--store-events (list fetched))
                (setq gomuks--thread-events
                      (gomuks--merge-thread-events
                       root gomuks--thread-events (list fetched)))
@@ -1251,12 +1245,9 @@ When MORE is non-nil, use the saved pagination token."
                  (with-current-buffer buffer (setq gomuks--initial-history-requested nil))
                  (message "gomuks: %s" failure))
              (with-current-buffer buffer
-               (dolist (event (gomuks--alist 'events response))
-                 (when-let* ((rowid (gomuks--alist 'rowid event)))
-                   (puthash rowid event gomuks--events)))
-               (dolist (related (gomuks--alist 'related_events response))
-                 (when-let* ((rowid (gomuks--alist 'rowid related)))
-                   (puthash rowid related gomuks--events)))
+               (gomuks--store-events
+                (append (gomuks--alist 'events response)
+                        (gomuks--alist 'related_events response)))
                (setq gomuks--thread-events
                      (gomuks--merge-thread-events
                       root gomuks--thread-events

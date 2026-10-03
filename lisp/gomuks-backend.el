@@ -160,8 +160,7 @@ followed by the parsed response or nil."
        (setq gomuks--connection-status "Connected")
        (gomuks--render-rooms))
       ("events_decrypted"
-       (dolist (item (gomuks--alist 'events data))
-         (puthash (gomuks--alist 'rowid item) item gomuks--events))
+       (gomuks--store-events (gomuks--alist 'events data))
        (gomuks--render-room (gomuks--alist 'room_id data)))
       ("send_complete"
        (when-let* ((failure (gomuks--alist 'error data)))
@@ -204,8 +203,7 @@ followed by the parsed response or nil."
                                        (gethash id gomuks--rooms))))
           (remhash id gomuks--last-read))
         (puthash id meta gomuks--rooms))
-      (dolist (item (gomuks--alist 'events room))
-        (puthash (gomuks--alist 'rowid item) item gomuks--events))
+      (gomuks--store-events (gomuks--alist 'events room))
       (when-let* ((members (gomuks--alist 'm.room.member
                                           (gomuks--alist 'state room))))
         (let ((state (or (gethash id gomuks--member-state)
