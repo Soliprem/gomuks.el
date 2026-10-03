@@ -87,6 +87,7 @@ web page.
 | Room                            | `C-c C-a`           | Upload a file                                               |
 | Room or composer                | `C-c C-p`           | Send a local image as a sticker                             |
 | Room or composer                | `C-c C-g`           | GIF/WebP file or direct HTTPS image URL (stage in composer) |
+| Room or composer                | `C-c C-y`           | Retry a retained failed send                                |
 | Room                            | `o` / `C-c C-o`     | Open attachment at point                                    |
 | Room                            | `C-c C-SPC`         | Pause or resume audio                                       |
 | Room                            | `C-c <` / `C-c >`   | Seek audio back or forward five seconds                     |

@@ -1,26 +1,19 @@
-;;; gomuks-media.el --- Media handling for Gomuks -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
-;;
+;;; gomuks-media.el --- Media transfers and playback -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
+
 ;; Copyright (C) 2026 Francesco Prem Solidoro
-;;
 ;; Author: Francesco Prem Solidoro <francesco.solidoro@studio.unibo.it>
-;; Maintainer: Francesco Prem Solidoro <francesco.solidoro@studio.unibo.it>
-;; Created: settembre 30, 2026
-;; Modified: settembre 30, 2026
-;; Version: 0.0.1
-;; Keywords: abbrev bib c calendar comm convenience data docs emulations extensions faces files frames games hardware help hypermedia i18n internal languages lisp local maint mail matching mouse multimedia news outlines processes terminals tex text tools unix vc
-;; Homepage: https://github.com/Soliprem/gomuks-media
-;;
-;; This file is not part of GNU Emacs.
-;;
+;; Keywords: comm
+;; URL: https://github.com/Soliprem/gomuks.el
+
 ;;; Commentary:
-;;
-;;  Description
-;;
+;; Own download files, preview limits and playback controls.
+
 ;;; Code:
 
 (require 'gomuks-backend)
+(require 'gomuks-content)
 (declare-function gomuks--render-room "gomuks-view" (id))
-(declare-function gomuks--event-at-point "gomuks-view")
+(declare-function gomuks--event-at-point "gomuks-render")
 (declare-function empv-play "empv" (uri))
 (declare-function empv-toggle "empv" ())
 (declare-function empv-seek "empv" (target &optional type))
@@ -46,59 +39,6 @@
                                  (gomuks--alist 'type event)) "m.sticker")
                       "m.sticker"
                     (gomuks--alist 'msgtype content))))))
-
-(defun gomuks--upload-file (file room-id callback)
-  "Upload FILE for ROOM-ID, then call CALLBACK with error and content."
-  (unless (executable-find "curl")
-    (user-error "Curl is required to upload attachments"))
-  (let* ((filename (file-name-nondirectory file))
-         (encrypted (gomuks--alist 'encryption_event
-                                   (gethash room-id gomuks--rooms)))
-         (url (gomuks--url
-               (format "upload?filename=%s&encrypt=%s"
-                       (url-hexify-string filename)
-                       (if encrypted "true" "false"))))
-         (response-file (make-temp-file "gomuks-upload-response-"))
-         (auth (gomuks--authorization))
-         (process
-          (make-process
-           :name "gomuks-upload" :buffer nil :connection-type 'pipe
-           :command (list "curl" "--silent" "--show-error" "--fail"
-                          "--request" "POST"
-                          "--header" "Content-Type: application/octet-stream"
-                          "--data-binary" (concat "@" (expand-file-name file))
-                          "--output" response-file "--config" "-" url)
-           :sentinel
-           (lambda (proc _event)
-             (when (memq (process-status proc) '(exit signal))
-               (let ((failure (unless (= (process-exit-status proc) 0)
-                                "upload request failed"))
-                     (content nil))
-                 (unless failure
-                   (condition-case err
-                       (setq content
-                             (json-parse-string
-                              (with-temp-buffer
-                                (insert-file-contents response-file)
-                                (buffer-string))
-                              :object-type 'hash-table :array-type 'array
-                              :false-object nil :null-object nil))
-                     (error (setq failure (format "invalid upload response: %s" err)))))
-                 (delete-file response-file)
-                 (funcall callback failure content)))))))
-    (process-send-string process
-                         (if auth
-                             (format "header = \"Authorization: %s\"\n" auth)
-                           ""))
-    (process-send-eof process)))
-
-(defun gomuks--clear-media-cache ()
-  "Delete downloaded media files and clear their cache entries."
-  (maphash (lambda (_key path)
-             (when (file-exists-p path)
-               (delete-file path)))
-           gomuks--media-cache)
-  (clrhash gomuks--media-cache))
 
 (defun gomuks-audio-toggle ()
   "Pause or resume audio playing through the configured backend."
@@ -150,54 +90,9 @@
              (url-hexify-string (match-string 2 mxc))
              (if (plist-get attachment :encrypted) "true" "false")))))
 
-(defun gomuks--fetch-media (attachment callback)
-  "Fetch ATTACHMENT and call CALLBACK with a local path or nil."
-  (let* ((key (gomuks--media-key attachment))
-         (cached (gomuks--cached-media attachment))
-         (pending (gethash key gomuks--media-pending)))
-    (cond
-     (cached (funcall callback cached))
-     (pending
-      (puthash key (cons callback pending) gomuks--media-pending))
-     (t
-      (unless (executable-find "curl")
-        (user-error "Curl is required to load attachments"))
-      (remhash key gomuks--media-failures)
-      (let* ((extension (file-name-extension
-                         (plist-get attachment :name)))
-             (path (make-temp-file "gomuks-media-" nil
-                                   (if extension (concat "." extension) ".bin")))
-             (auth (gomuks--authorization))
-             (url (gomuks--media-url attachment)))
-        (puthash key (list callback) gomuks--media-pending)
-        (let ((process
-               (make-process
-                :name "gomuks-media" :buffer nil :connection-type 'pipe
-                :command (list "curl" "--silent" "--show-error" "--fail"
-                               "--location" "--output" path "--config" "-" url)
-                :sentinel
-                (lambda (proc _event)
-                  (when (memq (process-status proc) '(exit signal))
-                    (let ((callbacks (gethash key gomuks--media-pending))
-                          (ok (= (process-exit-status proc) 0)))
-                      (remhash key gomuks--media-pending)
-                      (if ok
-                          (puthash key path gomuks--media-cache)
-                        (delete-file path)
-                        (puthash key t gomuks--media-failures)
-                        (message "gomuks: attachment download failed"))
-                      (dolist (fn callbacks)
-                        (funcall fn (when ok path)))))))))
-          ;; The auth token stays off the process command line.
-          (process-send-string process
-                               (if auth
-                                   (format "header = \"Authorization: %s\"\n" auth)
-                                 ""))
-          (process-send-eof process)))))))
-
 (defun gomuks--media-key (attachment)
   "Return the cache key for ATTACHMENT."
-  (list gomuks-backend-url
+  (list gomuks-backend-url gomuks--user-id
         (plist-get attachment :mxc)
         (plist-get attachment :encrypted)))
 
@@ -205,38 +100,13 @@
   "Return ATTACHMENT's cached local path if the file still exists."
   (let* ((key (gomuks--media-key attachment))
          (path (gethash key gomuks--media-cache)))
-    (if (and path (file-exists-p path))
-        path
-      (remhash key gomuks--media-cache)
-      nil)))
-
-(defun gomuks--maybe-preview-image (attachment id)
-  "Fetch a small image ATTACHMENT and redraw room ID when ready."
-  (let ((key (gomuks--media-key attachment))
-        (generation (gomuks--cache-token id))
-        (size (plist-get attachment :size))
-        (sticker (equal (plist-get attachment :kind) "m.sticker")))
-    (when (and (or gomuks-inline-images
-                   sticker)
-               (display-images-p)
-               (member (plist-get attachment :kind) '("m.image" "m.sticker"))
-               (or (and (numberp size)
-                        (<= size gomuks-inline-image-max-bytes))
-                   (and sticker (not (numberp size))))
-               (not (gomuks--cached-media attachment))
-               (not (gethash key gomuks--media-pending))
-               (not (gethash key gomuks--media-failures)))
-      (gomuks--fetch-media
-       attachment
-       (lambda (path)
-         (when (and path (gomuks--cache-current-p id generation))
-           (gomuks--render-room id)))))))
+    (and path (file-exists-p path) path)))
 
 (defun gomuks-save-attachment (&optional destination event)
   "Save the attachment in EVENT, or at point, to DESTINATION."
   (interactive)
   (let* ((event (or event (gomuks--event-at-point)))
-         (attachment (gomuks--attachment (gomuks--event-content event) event)))
+         (attachment (gomuks--attachment (gomuks--effective-content event) event)))
     (unless attachment (user-error "No downloadable attachment on this line"))
     (setq destination
           (or destination
@@ -260,7 +130,7 @@
   "Load the attachment in EVENT, or at point, and open it."
   (interactive)
   (let* ((event (or event (gomuks--event-at-point)))
-         (attachment (gomuks--attachment (gomuks--event-content event) event))
+         (attachment (gomuks--attachment (gomuks--effective-content event) event))
          (mime (and attachment (plist-get attachment :mime)))
          (kind (and attachment (plist-get attachment :kind))))
     (unless attachment (user-error "No downloadable attachment on this line"))
@@ -280,14 +150,150 @@
              ('empv
               (if (require 'empv nil t)
                   (empv-play path)
-                (unless (executable-find "mpv")
-                  (user-error "mpv is required to play audio attachments"))
-                (start-process "gomuks-audio" nil "mpv" "--no-video" "--" path)))))
+                (user-error "Install EMPV for playback and controls, or select EMMS")))))
           ((or (equal kind "m.video")
                (and mime (string-prefix-p "video/" mime)))
            (browse-url-default-browser (browse-url-file-url path)))
           (t (pop-to-buffer (find-file-noselect path)))))))))
 
+
+(defun gomuks--upload-file (file room-id callback)
+  "Upload FILE using ROOM-ID's known encryption state, then call CALLBACK."
+  (let ((meta (gethash room-id gomuks--rooms)))
+    (unless meta (user-error "Room encryption state is unknown; reload the room first"))
+    (gomuks--curl-file
+     (gomuks--url (format "upload?filename=%s&encrypt=%s"
+                          (url-hexify-string (file-name-nondirectory file))
+                          (if (gomuks--alist 'encryption_event meta) "true" "false")))
+     (list "--request" "POST" "--header" "Content-Type: application/octet-stream"
+           "--data-binary" (concat "@" (expand-file-name file)))
+     (lambda (failure path)
+       (let (content)
+         (when path
+           (unwind-protect
+               (condition-case err
+                   (setq content (json-parse-string
+                                  (with-temp-buffer
+                                    (insert-file-contents path) (buffer-string))
+                                  :object-type 'hash-table :array-type 'array
+                                  :false-object nil :null-object nil))
+                 (error (setq failure (format "invalid upload response: %s" err))))
+             (delete-file path)))
+         (funcall callback failure content)))
+     (* 1024 1024) (gomuks--authorization))))
+
+(defvar gomuks--preview-queue nil "Automatic previews waiting for a download slot.")
+(defvar gomuks--preview-active 0 "Automatic downloads currently running.")
+(defvar gomuks--media-uncached nil "Explicit oversized downloads owned until cleanup.")
+
+(defun gomuks--clear-media-cache ()
+  "Delete owned media files and discard queued automatic previews."
+  (setq gomuks--preview-queue nil)
+  (maphash (lambda (_key path) (ignore-errors (delete-file path))) gomuks--media-cache)
+  (dolist (path gomuks--media-uncached) (ignore-errors (delete-file path)))
+  (setq gomuks--media-uncached nil)
+  (clrhash gomuks--media-cache)
+  (clrhash gomuks--media-failures))
+
+(defun gomuks--preview-file-p (path)
+  "Query whether PATH's actual file size permits an automatic preview."
+  (when-let* ((attributes (file-attributes path)))
+    (<= (file-attribute-size attributes) gomuks-inline-image-max-bytes)))
+
+(defun gomuks--cache-media (key path)
+  "Own PATH and cache it under KEY, evicting oldest files to respect the quota."
+  (when-let* ((previous (gethash key gomuks--media-cache)))
+    (unless (equal previous path) (ignore-errors (delete-file previous)))
+    (remhash key gomuks--media-cache))
+  (let ((size (file-attribute-size (file-attributes path))) entries (total 0))
+    (maphash (lambda (cache-key file)
+               (when-let* ((attr (file-attributes file)))
+                 (cl-incf total (file-attribute-size attr))
+                 (push (list cache-key file (file-attribute-modification-time attr)
+                             (file-attribute-size attr)) entries))) gomuks--media-cache)
+    (if (> size gomuks-media-cache-max-bytes)
+        (push path gomuks--media-uncached)
+      (dolist (entry (sort entries (lambda (a b) (time-less-p (nth 2 a) (nth 2 b)))))
+        (when (> (+ total size) gomuks-media-cache-max-bytes)
+          (remhash (car entry) gomuks--media-cache)
+          (ignore-errors (delete-file (cadr entry)))
+          (cl-decf total (nth 3 entry))))
+      (puthash key path gomuks--media-cache))))
+
+(defun gomuks--fetch-media (attachment callback &optional limit)
+  "Fetch ATTACHMENT, calling CALLBACK with path/nil. LIMIT bounds actual bytes.
+Coalesce consumers with the same transfer policy; isolate consumer failures."
+  (let* ((key (gomuks--media-key attachment))
+         (pending-key (list key limit))
+         (cached (gomuks--cached-media attachment))
+         (pending (gethash pending-key gomuks--media-pending)))
+    (cond
+     ((and cached (or (not limit)
+                      (<= (file-attribute-size (file-attributes cached)) limit)))
+      (funcall callback cached))
+     (pending (puthash pending-key (cons callback pending) gomuks--media-pending))
+     (t
+      (puthash pending-key (list callback) gomuks--media-pending)
+      (remhash key gomuks--media-failures)
+      (let ((complete
+             (lambda (failure path)
+               (let ((callbacks (gethash pending-key gomuks--media-pending)))
+		 (remhash pending-key gomuks--media-pending)
+		 (when path
+		   (let ((extension (file-name-extension (plist-get attachment :name))))
+		     (when (and extension (string-match-p "\\`[[:alnum:]]\\{1,12\\}\\'" extension))
+                       (condition-case err
+			   (let ((named (concat path "." extension)))
+			     (rename-file path named) (setq path named))
+			 (error
+			  (ignore-errors (delete-file path))
+			  (setq path nil failure (error-message-string err)))))))
+		 (if failure (puthash key t gomuks--media-failures)
+		   (gomuks--cache-media key path))
+		 (dolist (fn (reverse callbacks))
+		   (condition-case err (funcall fn path)
+		     (error (message "gomuks: media callback failed: %s"
+				     (error-message-string err)))))))))
+        (condition-case err
+            (gomuks--curl-file (gomuks--media-url attachment) nil complete
+                               limit (gomuks--authorization))
+          (error
+           (if (gethash pending-key gomuks--media-pending)
+               (funcall complete (error-message-string err) nil)
+             (signal (car err) (cdr err))))))))))
+
+(defun gomuks--drain-previews ()
+  "Procedure: start valid queued previews while download slots remain."
+  (while (and gomuks--preview-queue
+              (< gomuks--preview-active (max 1 gomuks-preview-concurrency)))
+    (pcase-let ((`(,attachment ,id ,token) (pop gomuks--preview-queue)))
+      (when (and gomuks-inline-images (gomuks--cache-current-p id token)
+                 (not (gomuks--cached-media attachment)))
+        (cl-incf gomuks--preview-active)
+        (gomuks--fetch-media
+         attachment
+         (lambda (path)
+           (cl-decf gomuks--preview-active)
+           (unwind-protect
+               (when (and path (gomuks--cache-current-p id token))
+                 (gomuks--render-room id))
+             (gomuks--drain-previews)))
+         gomuks-inline-image-max-bytes)))))
+
+(defun gomuks--maybe-preview-image (attachment id)
+  "Procedure: queue an eligible automatic ATTACHMENT preview for room ID."
+  (let ((key (gomuks--media-key attachment)) (size (plist-get attachment :size)))
+    (when (and gomuks-inline-images (display-images-p)
+               (member (plist-get attachment :kind) '("m.image" "m.sticker"))
+               (or (not (numberp size)) (<= size gomuks-inline-image-max-bytes))
+               (not (gomuks--cached-media attachment))
+               (not (gethash (list key gomuks-inline-image-max-bytes) gomuks--media-pending))
+               (not (gethash key gomuks--media-failures))
+               (not (cl-find attachment gomuks--preview-queue :key #'car :test #'equal)))
+      (setq gomuks--preview-queue
+            (append gomuks--preview-queue
+                    (list (list attachment id (gomuks--cache-token id)))))
+      (gomuks--drain-previews))))
 
 (provide 'gomuks-media)
 ;;; gomuks-media.el ends here

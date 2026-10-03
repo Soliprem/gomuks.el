@@ -1,28 +1,21 @@
-;;; gomuks-compose.el --- Composer for gomuks -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
-;;
+;;; gomuks-compose.el --- Draft buffers and composition commands -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
+
 ;; Copyright (C) 2026 Francesco Prem Solidoro
-;;
 ;; Author: Francesco Prem Solidoro <francesco.solidoro@studio.unibo.it>
-;; Maintainer: Francesco Prem Solidoro <francesco.solidoro@studio.unibo.it>
-;; Created: settembre 30, 2026
-;; Modified: settembre 30, 2026
-;; Version: 0.0.1
-;; Keywords: abbrev bib c calendar comm convenience data docs emulations extensions faces files frames games hardware help hypermedia i18n internal languages lisp local maint mail matching mouse multimedia news outlines processes terminals tex text tools unix vc
-;; Homepage: https://github.com/Soliprem/gomuks.el
-;;
-;; This file is not part of GNU Emacs.
-;;
+;; Keywords: comm
+;; URL: https://github.com/Soliprem/gomuks.el
+
 ;;; Commentary:
-;;
-;;  Description
-;;
+;; Own draft buffers and staged files. Delivery lifecycle lives in gomuks-send.
+
 ;;; Code:
 
-(require 'gomuks-media)
+(require 'gomuks-send)
+(require 'gomuks-members)
 (declare-function gomuks-compose-mode "gomuks-ui")
 (declare-function gomuks-attachment-preview-mode "gomuks-ui")
 (declare-function gomuks-home "gomuks-view")
-(declare-function gomuks--event-at-point "gomuks-view")
+(declare-function gomuks--event-at-point "gomuks-render")
 (declare-function evil-insert-state "evil-commands")
 
 (defun gomuks--pending-attachments ()
@@ -32,54 +25,34 @@
   gomuks--compose-attachment)
 
 (defun gomuks-compose-send ()
-  "Send this draft, uploading its pending attachment when present."
+  "Snapshot this draft and retain it until confirmed delivery."
   (interactive)
-  (unless (derived-mode-p 'gomuks-compose-mode)
-    (user-error "Not in a Gomuks composer"))
-  (when gomuks--compose-sending
-    (user-error "This draft is already being sent"))
-  (let* ((buffer (current-buffer))
-         (text (string-trim-right (buffer-substring-no-properties
-                                   (point-min) (point-max))))
-         (attachments (gomuks--pending-attachments))
-         (id gomuks--room-id)
-         (relation (or gomuks--compose-relation
-                       (when gomuks--thread-root
-                         `((rel_type . "m.thread")
-                           (event_id . ,gomuks--thread-root))))))
+  (unless (derived-mode-p 'gomuks-compose-mode) (user-error "Not in a Gomuks composer"))
+  (when gomuks--compose-sending (user-error "This draft is already being sent"))
+  (when gomuks--compose-job
+    (if (or (gomuks--send-event gomuks--compose-job)
+            (eq (gomuks--send-phase gomuks--compose-job) 'uncertain))
+        (user-error "Use C-c C-y to recover the previous send before submitting again")
+      (remhash (gomuks--send-id gomuks--compose-job) gomuks--sends)
+      (setq gomuks--compose-job nil)))
+  (let ((text (string-trim-right (buffer-substring-no-properties (point-min) (point-max))))
+        (attachments (gomuks--pending-attachments))
+        (relation (or gomuks--compose-relation
+                      (when gomuks--thread-root
+                        `((rel_type . "m.thread") (event_id . ,gomuks--thread-root))))))
     (when (and (not attachments) (string-empty-p (string-trim text)))
       (user-error "Message is empty"))
-    (setq gomuks--compose-sending t)
-    (if attachments
-        (gomuks--send-next-attachment buffer text id relation attachments)
-      (gomuks--post
-       "send_message"
-       (append `((room_id . ,id) (text . ,text))
-               (when-let* ((mentions (gomuks--draft-mentions text)))
-                 `((mentions . ,mentions)))
-               (when relation `((relates_to . ,relation))))
-       (lambda (failure _response)
-         (gomuks--finish-compose-send buffer text failure))))))
+    (gomuks--start-send (current-buffer) gomuks--room-id text relation attachments)))
 
 (defun gomuks-send-message (&optional text)
-  "Compose a message, or send TEXT directly when supplied."
+  "Compose a message, or submit TEXT with retained delivery recovery."
   (interactive)
-  (unless (derived-mode-p 'gomuks-room-mode)
-    (user-error "Open a gomuks room first"))
-  (if (null text)
-      (gomuks-compose)
-    (when (string-empty-p (string-trim text))
-      (user-error "Message is empty"))
-    (let ((id gomuks--room-id)
-          (relation (when gomuks--thread-root
-                      `((rel_type . "m.thread")
-                        (event_id . ,gomuks--thread-root)))))
-      (gomuks--post
-       "send_message"
-       (append `((room_id . ,id) (text . ,text))
-               (when relation `((relates_to . ,relation))))
-       (lambda (failure _response)
-         (message "gomuks: %s" (or failure "message queued")))))))
+  (unless (derived-mode-p 'gomuks-room-mode) (user-error "Open a gomuks room first"))
+  (if (null text) (gomuks-compose)
+    (when (string-empty-p (string-trim text)) (user-error "Message is empty"))
+    (gomuks--start-send nil gomuks--room-id text
+                        (when gomuks--thread-root
+                          `((rel_type . "m.thread") (event_id . ,gomuks--thread-root))) nil)))
 
 (defun gomuks-insert-emoji ()
   "Search for an emoji and insert it into the current draft."
@@ -88,7 +61,7 @@
     (user-error "Focus a Gomuks draft first"))
   (if (fboundp 'emoji-search)
       (call-interactively #'emoji-search)
-    (insert (read-char-by-name "Emoji: " t))))
+    (insert (read-char-by-name "Emoji: "))))
 
 (defun gomuks--show-room (buffer)
   "Display room BUFFER with its composer below it."
@@ -98,33 +71,6 @@
     (set-frame-parameter nil 'gomuks-composer-window composer-window)
     (set-window-buffer composer-window (gomuks--composer-buffer buffer)))
   (select-window (get-buffer-window buffer)))
-
-(defun gomuks--request-mention-members (id)
-  "Load the member list for room ID once for composer completion."
-  (when (and id (not (gethash id gomuks--mention-members-loaded)))
-    (let ((generation (gomuks--cache-token id)))
-      (puthash id 'loading gomuks--mention-members-loaded)
-      (gomuks--post
-       "get_room_state"
-       (append `((room_id . ,id) (include_members . t))
-               (unless (gomuks--alist 'has_member_list
-                                      (gethash id gomuks--rooms))
-                 '((fetch_members . t))))
-       (lambda (failure events)
-         (when (gomuks--cache-current-p id generation)
-           (if failure
-               (remhash id gomuks--mention-members-loaded)
-             (let ((state (or (gethash id gomuks--member-state)
-                              (make-hash-table :test 'equal))))
-               (dolist (event events)
-                 (when (and (equal (gomuks--alist 'type event) "m.room.member")
-                            (equal (gomuks--alist 'room_id event) id)
-                            (gomuks--alist 'rowid event))
-                   (gomuks--store-events (list event))
-                   (puthash (gomuks--alist 'state_key event)
-                            (gomuks--alist 'rowid event) state)))
-               (puthash id state gomuks--member-state)
-               (puthash id t gomuks--mention-members-loaded)))))))))
 
 (defun gomuks--mention-capf ()
   "Complete an @name in the composer with a room member."
@@ -153,7 +99,8 @@
                      candidates))))
          state))
       (when candidates
-        (list start (point) (nreverse candidates)
+        (setq candidates (nreverse candidates))
+        (list start (point) candidates
               :exit-function
               (lambda (candidate status)
                 (when (eq status 'finished)
@@ -168,19 +115,6 @@
                                        "[][\\`*_()]"
                                        (lambda (match) (concat "\\" match)) name)
                                       (url-hexify-string user-id))))))))))))
-
-(defun gomuks--draft-mentions (text)
-  "Return Matrix mention metadata for completed mentions in TEXT."
-  (let ((start 0) ids)
-    (while (string-match "https://matrix\\.to/#/\\(%40[^)[:space:]]+\\)" text start)
-      (let ((end (match-end 0))
-            (id (url-unhex-string (match-string 1 text))))
-        (when (and (string-match-p "\\`@[^:]+:.+\\'" id)
-                   (not (member id ids)))
-          (push id ids))
-        (setq start end)))
-    (when ids
-      `((user_ids . ,(vconcat (nreverse ids)))))))
 
 (defun gomuks--delete-temp-attachments (attachments)
   "Delete temporary files in ATTACHMENTS."
@@ -202,14 +136,27 @@
                             (if (cdr attachments)
                                 (format "%d attachments" (length attachments))
                               (nth 2 (car attachments)))))
-                  "  •  C-c C-k return"))))
+                  (when gomuks--compose-job
+                    (format "  •  %s" (gomuks--send-phase gomuks--compose-job)))
+                  "  •  C-c C-y retry  •  C-c C-k return"))))
 
 (defun gomuks--cleanup-compose-attachment ()
-  "Forget pending attachments and remove their temporary files."
-  (when (and (gomuks--pending-attachments) (not gomuks--compose-sending))
-    (let ((attachments gomuks--compose-attachment))
-      (setq gomuks--compose-attachment nil)
-      (gomuks--delete-temp-attachments attachments))))
+  "Release staged files except those still owned by a retained send record."
+  (let* ((owned (and gomuks--compose-job
+                     (gethash (gomuks--send-id gomuks--compose-job) gomuks--sends)
+                     (gomuks--send-remaining gomuks--compose-job)))
+         (staged (gomuks--pending-attachments)))
+    (setq gomuks--compose-attachment nil)
+    (gomuks--delete-temp-attachments (cl-set-difference staged owned :test #'eq))))
+
+(defun gomuks--prepare-attachment-change ()
+  "Return unaccepted failed snapshots to this draft before changing its files."
+  (when gomuks--compose-job
+    (if (or (gomuks--send-event gomuks--compose-job)
+            (eq (gomuks--send-phase gomuks--compose-job) 'uncertain))
+        (user-error "Recover or discard the accepted send before changing its attachments")
+      (remhash (gomuks--send-id gomuks--compose-job) gomuks--sends)
+      (setq gomuks--compose-job nil))))
 
 (defun gomuks--stage-attachment (file temporary &optional label)
   "Queue FILE in this draft until send; delete it later if TEMPORARY.
@@ -218,6 +165,7 @@ LABEL is shown in the composer header."
     (user-error "Focus a Gomuks draft first"))
   (when gomuks--compose-sending
     (user-error "This draft is already being sent"))
+  (gomuks--prepare-attachment-change)
   (unless (file-regular-p file)
     (user-error "Attachment file does not exist"))
   (gomuks--pending-attachments)
@@ -258,6 +206,7 @@ LABEL is shown in the composer header."
     (user-error "Focus a Gomuks draft first"))
   (when gomuks--compose-sending
     (user-error "This draft is already being sent"))
+  (gomuks--prepare-attachment-change)
   (setq attachment (or attachment
                        (gomuks--choose-attachment "Remove attachment: ")))
   (unless (memq attachment (gomuks--pending-attachments))
@@ -372,75 +321,15 @@ and INITIAL-TEXT seeds a newly created draft."
         (select-window window)
       (gomuks-home))))
 
-(defun gomuks--finish-compose-send (buffer text failure &optional remaining)
-  "Finish sending BUFFER's TEXT, reporting FAILURE.
-Clean temporary files in REMAINING if BUFFER was closed during sending."
-  (if (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (setq gomuks--compose-sending nil)
-        (when (and (not failure)
-                   (equal text (string-trim-right (buffer-string))))
-          (erase-buffer)
-          (set-buffer-modified-p nil)))
-    (gomuks--delete-temp-attachments remaining))
-  (message "gomuks: %s" (or failure "message queued")))
-
-(defun gomuks--send-next-attachment (buffer text id relation remaining)
-  "Send the first of REMAINING from BUFFER, with TEXT on the last.
-Use ID and RELATION for every attachment event."
-  (let ((attachment (car remaining))
-        (caption (if (cdr remaining) "" text)))
-    (condition-case upload-error
-        (progn
-          (message "gomuks: uploading %s" (nth 2 attachment))
-          (gomuks--upload-file
-           (car attachment) id
-           (lambda (failure content)
-             (if failure
-                 (gomuks--finish-compose-send buffer text failure remaining)
-               (condition-case send-error
-                   (gomuks--post
-                    "send_message"
-                    (append `((room_id . ,id) (text . ,caption)
-                              (base_content . ,content))
-                            (when (not (string-empty-p caption))
-                              (when-let* ((mentions (gomuks--draft-mentions caption)))
-                                `((mentions . ,mentions))))
-                            (when relation `((relates_to . ,relation))))
-                    (lambda (send-failure _response)
-                      (if send-failure
-                          (gomuks--finish-compose-send
-                           buffer text send-failure remaining)
-                        (gomuks--delete-temp-attachments (list attachment))
-                        (when (buffer-live-p buffer)
-                          (with-current-buffer buffer
-                            (setq gomuks--compose-attachment
-                                  (cdr gomuks--compose-attachment))
-                            (gomuks--update-composer-header)))
-                        (cond
-                         ((not (buffer-live-p buffer))
-                          (gomuks--finish-compose-send
-                           buffer text "draft closed" (cdr remaining)))
-                         ((cdr remaining)
-                          (gomuks--send-next-attachment
-                           buffer text id relation (cdr remaining)))
-                         (t (gomuks--finish-compose-send buffer text nil))))))
-                 (error
-                  (gomuks--finish-compose-send
-                   buffer text (error-message-string send-error) remaining)))))))
-      (error
-       (gomuks--finish-compose-send
-        buffer text (error-message-string upload-error) remaining)))))
-
 (defun gomuks--send-related (text relation &optional base-content)
-  "Send TEXT with Matrix RELATION and optional BASE-CONTENT."
-  (gomuks--post
-   "send_message"
-   (append `((room_id . ,gomuks--room-id) (text . ,text)
-             (relates_to . ,relation))
-           (when base-content `((base_content . ,base-content))))
-   (lambda (failure _response)
-     (message "gomuks: %s" (or failure "message queued")))))
+  "Submit TEXT with RELATION and optional BASE-CONTENT, retaining recovery."
+  (let ((send (gomuks--make-send :id (cl-incf gomuks--send-serial)
+                                 :room gomuks--room-id :backend gomuks-backend-url
+                                 :account gomuks--user-id :text text :caption text
+                                 :relation relation :content base-content
+                                 :token (gomuks--cache-token gomuks--room-id))))
+    (puthash (gomuks--send-id send) send gomuks--sends)
+    (gomuks--send-submit send)))
 
 (defun gomuks-reply (&optional text)
   "Compose a reply to the message at point, or send TEXT directly."
@@ -462,6 +351,9 @@ Use ID and RELATION for every attachment event."
   (interactive)
   (let* ((event (gomuks--event-at-point))
          (event-id (gomuks--alist 'event_id event)))
+    (when (and gomuks--user-id (gomuks--alist 'sender event)
+               (not (equal gomuks--user-id (gomuks--alist 'sender event))))
+      (user-error "You can only edit your own messages"))
     (unless event-id (user-error "This message has no event ID yet"))
     (let ((relation `((rel_type . "m.replace") (event_id . ,event-id))))
       (if text
@@ -469,39 +361,22 @@ Use ID and RELATION for every attachment event."
         (gomuks--show-composer
          (gomuks--composer-buffer
           (current-buffer) relation (concat "edit " event-id)
-          (gomuks--alist 'body (gomuks--event-content event))))))))
+          (gomuks--edit-source event)))))))
 
 (defun gomuks-send-file (file &optional sticker delete-after-upload)
-  "Attach FILE to a draft, or send it from a room buffer.
-When STICKER is non-nil, send an `m.sticker' event immediately.
-When DELETE-AFTER-UPLOAD is non-nil, remove FILE when it is no longer needed."
+  "Stage FILE in a composer, or submit it with recoverable delivery ownership.
+STICKER sends native sticker content. DELETE-AFTER-UPLOAD means the temporary
+file is owned until confirmed delivery, rather than merely until upload."
   (interactive "fFile to send: ")
   (unless gomuks--room-id (user-error "Open a room first"))
   (if (and (not sticker) (derived-mode-p 'gomuks-compose-mode))
       (gomuks--stage-attachment file delete-after-upload)
-    (let* ((id gomuks--room-id)
-           (relation (or gomuks--compose-relation
-                         (when gomuks--thread-root
-                           `((rel_type . "m.thread")
-                             (event_id . ,gomuks--thread-root))))))
-      (message "gomuks: uploading %s" (file-name-nondirectory file))
-      (gomuks--upload-file
-       file id
-       (lambda (failure content)
-         (when delete-after-upload
-           (ignore-errors (delete-file file)))
-         (if failure
-             (message "gomuks: upload failed: %s" failure)
-           (when sticker
-             (puthash "msgtype" "m.sticker" content))
-           (gomuks--post
-            "send_message"
-            (append `((room_id . ,id) (text . "")
-                      (base_content . ,content))
-                    (when relation `((relates_to . ,relation))))
-            (lambda (send-failure _response)
-              (message "gomuks: %s"
-                       (or send-failure "attachment queued"))))))))))
+    (gomuks--start-send
+     nil gomuks--room-id ""
+     (or gomuks--compose-relation
+         (when gomuks--thread-root
+           `((rel_type . "m.thread") (event_id . ,gomuks--thread-root))))
+     (list (list file delete-after-upload (file-name-nondirectory file))) sticker)))
 
 (defun gomuks-send-sticker (file)
   "Upload an image FILE and send it as a Matrix sticker."
@@ -542,55 +417,36 @@ When DELETE-AFTER-UPLOAD is non-nil, remove FILE when it is no longer needed."
         (when file (delete-file file))))))
 
 (defun gomuks-send-gif (source)
-  "Send a GIF or animated WebP from local file or HTTPS SOURCE."
+  "Stage or send a GIF/WebP from a local file or bounded HTTPS download."
   (interactive (list (read-string "GIF file or direct URL: ")))
   (unless gomuks--room-id (user-error "Open a room first"))
   (if (string-match-p "\\`https://" source)
-      (let ((source-buffer (current-buffer)))
-        (url-retrieve
-         source
-         (lambda (status)
-           (let ((response-buffer (current-buffer)))
-             (unwind-protect
-                 (let* ((code (and (boundp 'url-http-response-status)
-                                   url-http-response-status))
-                        (body-start (save-excursion
-                                      (goto-char (point-min))
-                                      (re-search-forward "\r?\n\r?\n" nil t)))
-                        (prefix (and body-start
-                                     (buffer-substring-no-properties
-                                      body-start (min (point-max) (+ body-start 12)))))
-                        (suffix (cond
-                                 ((and prefix (string-prefix-p "GIF8" prefix)) ".gif")
-                                 ((and prefix (string-prefix-p "RIFF" prefix)
-                                       (>= (length prefix) 12)
-                                       (string= (substring prefix 8 12) "WEBP"))
-                                  ".webp"))))
-                   (cond
-                    ((or (plist-get status :error) (not (equal code 200)))
-                     (message "gomuks: GIF download failed: %s"
-                              (or (plist-get status :error) code)))
-                    ((not suffix)
-                     (message "gomuks: URL did not return a GIF or WebP image"))
-                    (t
-                     (let ((file (make-temp-file "gomuks-gif-" nil suffix))
-                           (coding-system-for-write 'binary))
-                       (condition-case err
-                           (progn
-                             (write-region body-start (point-max) file nil 'silent)
-                             (if (buffer-live-p source-buffer)
-                                 (with-current-buffer source-buffer
-                                   (gomuks-send-file file nil t))
-                               (delete-file file)))
-                         (error
-                          (delete-file file)
-                          (message "gomuks: GIF download failed: %s" err)))))))
-               (when (buffer-live-p response-buffer)
-                 (kill-buffer response-buffer)))))
-         nil t))
+      (let ((buffer (current-buffer)) (id gomuks--room-id)
+            (token (gomuks--cache-token gomuks--room-id)))
+        (gomuks--curl-file
+         source nil
+         (lambda (failure path)
+           (if failure (message "gomuks: GIF download failed: %s" failure)
+             (let* ((prefix (with-temp-buffer
+                              (set-buffer-multibyte nil)
+                              (insert-file-contents-literally path nil 0 12)
+                              (buffer-string)))
+                    (suffix (cond ((string-prefix-p "GIF8" prefix) ".gif")
+                                  ((and (string-prefix-p "RIFF" prefix)
+                                        (>= (length prefix) 12)
+                                        (equal (substring prefix 8 12) "WEBP")) ".webp"))))
+               (if (and suffix (buffer-live-p buffer)
+                        (gomuks--cache-current-p id token))
+                   (let ((file (concat path suffix)))
+                     (rename-file path file)
+                     (condition-case err
+                         (with-current-buffer buffer (gomuks-send-file file nil t))
+                       (error (delete-file file) (message "gomuks: %s" (error-message-string err)))))
+                 (delete-file path)
+                 (message "gomuks: GIF target expired or URL was not a GIF/WebP")))))
+         (* 32 1024 1024)))
     (unless (and (file-regular-p source)
-                 (member (downcase (or (file-name-extension source) ""))
-                         '("gif" "webp")))
+                 (member (downcase (or (file-name-extension source) "")) '("gif" "webp")))
       (user-error "Choose a GIF or WebP file, or paste an HTTPS URL"))
     (gomuks-send-file source)))
 

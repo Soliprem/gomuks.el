@@ -42,12 +42,11 @@
 (defun gomuks-disconnect ()
   "Stop the live stream and forget the backend password."
   (interactive)
-  (when gomuks--reconnect-timer
-    (cancel-timer gomuks--reconnect-timer)
-    (setq gomuks--reconnect-timer nil))
-  (let ((process gomuks--stream))
-    (setq gomuks--stream nil)
-    (when (process-live-p process) (delete-process process)))
+  (gomuks--stop-stream)
+  (cl-incf gomuks--cache-generation)
+  (gomuks--cancel-operations)
+  (gomuks--disconnect-sends)
+  (gomuks--clear-media-cache)
   (setq gomuks--connection-status "Disconnected")
   (gomuks--render-rooms)
   (setq gomuks--password nil)
@@ -71,7 +70,18 @@ With prefix argument CHANGE-CREDENTIALS, ask for a new username too."
   (interactive)
   (gomuks-reconnect t))
 
-(add-hook 'kill-emacs-hook #'gomuks--clear-media-cache)
+(defun gomuks--shutdown ()
+  "Cancel operations, then release staged, retry and downloaded temporary files."
+  (gomuks--stop-stream)
+  (cl-incf gomuks--cache-generation)
+  (gomuks--cancel-operations)
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (derived-mode-p 'gomuks-compose-mode) (gomuks--cleanup-compose-attachment))))
+  (gomuks--cleanup-sends)
+  (gomuks--clear-media-cache))
+
+(add-hook 'kill-emacs-hook #'gomuks--shutdown)
 (add-function :after after-focus-change-function #'gomuks--maybe-mark-read)
 
 (provide 'gomuks)

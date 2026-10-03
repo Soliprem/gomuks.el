@@ -1,21 +1,13 @@
-;;; gomuks-core.el --- Shared definitions for gomuks -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
-;;
+;;; gomuks-core.el --- Shared state and cache ownership -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
+
 ;; Copyright (C) 2026 Francesco Prem Solidoro
-;;
 ;; Author: Francesco Prem Solidoro <francesco.solidoro@studio.unibo.it>
-;; Maintainer: Francesco Prem Solidoro <francesco.solidoro@studio.unibo.it>
-;; Created: settembre 30, 2026
-;; Modified: settembre 30, 2026
-;; Version: 0.0.1
-;; Keywords: abbrev bib c calendar comm convenience data docs emulations extensions faces files frames games hardware help hypermedia i18n internal languages lisp local maint mail matching mouse multimedia news outlines processes terminals tex text tools unix vc
-;; Homepage: https://github.com/Soliprem/gomuks.el
-;;
-;; This file is not part of GNU Emacs.
-;;
+;; Keywords: comm
+;; URL: https://github.com/Soliprem/gomuks.el
+
 ;;; Commentary:
-;;
-;;  Description
-;;
+;; Cache writers own domain tables; queries never start effects.
+
 ;;; Code:
 
 (require 'cl-lib)
@@ -52,6 +44,18 @@ The default shows them only while a Gomuks buffer is selected."
   :type 'boolean :group 'gomuks)
 (defcustom gomuks-inline-image-max-bytes (* 4 1024 1024)
   "Largest image automatically downloaded for an inline preview."
+  :type 'integer :group 'gomuks)
+(defcustom gomuks-request-timeout 30
+  "Deadline in seconds for ordinary backend requests."
+  :type 'number :group 'gomuks)
+(defcustom gomuks-transfer-timeout 120
+  "Deadline in seconds for uploads and explicit media downloads."
+  :type 'number :group 'gomuks)
+(defcustom gomuks-preview-concurrency 2
+  "Maximum number of automatic image downloads running together."
+  :type 'integer :group 'gomuks)
+(defcustom gomuks-media-cache-max-bytes (* 64 1024 1024)
+  "Maximum total bytes retained in the downloaded media cache."
   :type 'integer :group 'gomuks)
 (defcustom gomuks-audio-backend 'empv
   "Use EMPV or EMMS to play audio attachments."
@@ -129,6 +133,10 @@ The default shows them only while a Gomuks buffer is selected."
   "Room IDs muted by the current account's push rules.")
 (defvar gomuks--events (make-hash-table :test 'equal)
   "Cached events keyed by backend row ID.")
+(defvar gomuks--event-index (make-hash-table :test 'equal)
+  "Event rows indexed by (ROOM-ID . EVENT-ID).")
+(defvar gomuks--thread-index (make-hash-table :test 'equal)
+  "Thread reply row sets indexed by (ROOM-ID . ROOT-ID).")
 (defvar gomuks--member-state (make-hash-table :test 'equal)
   "Member event row IDs keyed by room ID and sender ID.")
 (defvar gomuks--requested-members (make-hash-table :test 'equal)
@@ -163,6 +171,8 @@ The default shows them only while a Gomuks buffer is selected."
         gomuks--rooms (make-hash-table :test 'equal)
         gomuks--muted-rooms (make-hash-table :test 'equal)
         gomuks--events (make-hash-table :test 'equal)
+        gomuks--event-index (make-hash-table :test 'equal)
+        gomuks--thread-index (make-hash-table :test 'equal)
         gomuks--member-state (make-hash-table :test 'equal)
         gomuks--requested-members (make-hash-table :test 'equal)
         gomuks--mention-members-loaded (make-hash-table :test 'equal)
@@ -172,10 +182,99 @@ The default shows them only while a Gomuks buffer is selected."
 
 (defun gomuks--store-events (events)
   "Store EVENTS by row ID, replacing previous event objects.
-Skip events without a row ID.  Update only the event cache."
+Skip events without a row ID.  Update the event cache and its lookup indexes."
   (dolist (event events)
     (when-let* ((rowid (gomuks--alist 'rowid event)))
-      (puthash rowid event gomuks--events))))
+      (when-let* ((old (gethash rowid gomuks--events)))
+        (gomuks--index-event old rowid nil))
+      (puthash rowid event gomuks--events)
+      (gomuks--index-event event rowid t))))
+
+(defun gomuks--index-event (event rowid add)
+  "Write EVENT's lookup indexes, adding ROWID when ADD is non-nil."
+  (let ((room (gomuks--alist 'room_id event))
+        (id (gomuks--alist 'event_id event)))
+    (when (and room id)
+      (if add (puthash (cons room id) rowid gomuks--event-index)
+        (remhash (cons room id) gomuks--event-index)))
+    (when (equal (gomuks--alist 'relation_type event) "m.thread")
+      (let* ((key (cons room (gomuks--alist 'relates_to event)))
+             (rows (gethash key gomuks--thread-index)))
+        (when (and add (not rows))
+          (setq rows (make-hash-table :test 'equal))
+          (puthash key rows gomuks--thread-index))
+        (when rows
+          (if (and add (not (gomuks--alist 'redacted_by event)))
+              (puthash rowid t rows)
+            (remhash rowid rows))
+          (when (= (hash-table-count rows) 0) (remhash key gomuks--thread-index)))))))
+
+(defun gomuks--event-rows (events)
+  "Transform EVENTS into unique identified row IDs, preserving order.
+Accept existing row IDs too, so retained views can be refreshed on reload."
+  (let ((seen (make-hash-table :test 'equal)) rows)
+    (dolist (event events (nreverse rows))
+      (let ((row (if (listp event) (gomuks--alist 'rowid event) event)))
+        (when (and row (not (gethash row seen)))
+          (puthash row t seen) (push row rows))))))
+
+(defun gomuks--merge-thread-rows (root old new)
+  "Query the current cache to merge OLD and NEW row IDs for ROOT."
+  (gomuks--event-rows
+   (gomuks--merge-thread-events root
+				(gomuks--events-for-rows (gomuks--event-rows old))
+				(gomuks--events-for-rows (gomuks--event-rows new)))))
+
+(defun gomuks--store-timeline (id items &optional prepend)
+  "Write unique timeline ITEMS for room ID in one batch.
+PREPEND places older rows before current rows. Return the added rows."
+  (let* ((old (gethash id gomuks--timelines))
+         (seen (make-hash-table :test 'equal)) added)
+    (dolist (row old) (puthash row t seen))
+    (dolist (item items)
+      (let ((row (gomuks--alist 'event_rowid item))
+            (timeline (gomuks--alist 'timeline_rowid item)))
+        (when (and row timeline)
+          (puthash row timeline gomuks--timeline-ids)
+          (unless (gethash row seen)
+            (puthash row t seen) (push row added)))))
+    (setq added (nreverse added))
+    (puthash id (if prepend (append added old) (append old added))
+             gomuks--timelines)
+    added))
+
+(defun gomuks--store-members (id events &optional only-missing)
+  "Write identified member EVENTS for ID, optionally ONLY-MISSING profiles."
+  (let ((state (or (gethash id gomuks--member-state)
+                   (make-hash-table :test 'equal))))
+    (dolist (event events)
+      (when (and (equal (gomuks--alist 'room_id event) id)
+                 (equal (gomuks--alist 'type event) "m.room.member")
+                 (gomuks--alist 'rowid event))
+        (gomuks--store-events (list event))
+        (let ((key (gomuks--alist 'state_key event)))
+          (unless (and only-missing (gethash key state))
+            (puthash key (gomuks--alist 'rowid event) state)))))
+    (puthash id state gomuks--member-state)))
+
+(defun gomuks--forget-room (id)
+  "Write a room leave: invalidate ID and remove all of its cached events."
+  (gomuks--reset-room-cache id)
+  (remhash id gomuks--rooms)
+  (remhash id gomuks--member-state)
+  (remhash id gomuks--muted-rooms)
+  (maphash (lambda (row event)
+             (when (equal (gomuks--alist 'room_id event) id)
+               (gomuks--index-event event row nil)
+               (remhash row gomuks--timeline-ids)
+               (remhash row gomuks--events))) gomuks--events))
+
+(defun gomuks--events-for-rows (rowids)
+  "Return cached events for ROWIDS in order, omitting missing rows."
+  (delq nil
+        (mapcar (lambda (rowid)
+                  (and rowid (gethash rowid gomuks--events)))
+                rowids)))
 
 (defun gomuks--cache-token (room-id)
   "Return the current cache and room generations for ROOM-ID."
@@ -200,10 +299,15 @@ Preserve cached events, room metadata, and member indexes."
                (remhash key gomuks--requested-members)))
            gomuks--requested-members))
 
+(defvar gomuks--view-serial 0 "Monotonic identity for new view buffer lifetimes.")
+(defvar-local gomuks--view-generation 0 "Identity of this view buffer lifetime.")
+(defvar-local gomuks--navigation-serial 0 "Latest explicit context navigation request.")
+(defvar-local gomuks--search-serial 0 "Latest search page request.")
+
 (defvar-local gomuks--room-id nil
   "Room ID associated with the current Gomuks buffer.")
 (defvar-local gomuks--reactions-event nil
-  "Message event whose reactions this buffer shows.")
+  "Row ID or Matrix event ID of the message whose reactions this buffer shows.")
 (defvar-local gomuks--reactions-key nil
   "Reaction key shown in this buffer.")
 (defvar-local gomuks--initial-history-requested nil
@@ -211,13 +315,13 @@ Preserve cached events, room metadata, and member indexes."
 (defvar-local gomuks--thread-root nil
   "Thread root event ID shown by the current buffer.")
 (defvar-local gomuks--thread-events nil
-  "Events shown in the current thread buffer.")
+  "Event row IDs shown in the current thread buffer.")
 (defvar-local gomuks--thread-next-batch nil
   "Pagination token for older events in the current thread.")
 (defvar-local gomuks--context-target nil
   "Reply target event ID shown by the current context buffer.")
 (defvar-local gomuks--context-events nil
-  "Events shown around the current reply target.")
+  "Event row IDs shown around the current reply target.")
 (defvar-local gomuks--parent-buffer nil
   "Buffer to return to from a thread or reply context.")
 (defvar-local gomuks--compose-relation nil
@@ -237,7 +341,13 @@ Preserve cached events, room metadata, and member indexes."
 (defvar-local gomuks--search-query nil
   "Query displayed by the current search buffer.")
 (defvar-local gomuks--search-results nil
-  "Events displayed by the current search buffer.")
+  "Event row IDs displayed by the current search buffer.")
+(defvar-local gomuks--history-state 'idle
+  "History workflow phase: idle, loading, exhausted or error.")
+(defvar-local gomuks--history-serial 0
+  "History request serial; changing it invalidates old completions.")
+(defvar-local gomuks--view-dirty nil
+  "Non-nil when cached updates have not yet been rendered in this view.")
 (defvar-local gomuks--search-next-batch nil
   "Token for the next page of search results.")
 (defvar-local gomuks--search-loading nil
@@ -269,8 +379,8 @@ Preserve cached events, room metadata, and member indexes."
   (gomuks--alist
    'event_id
    (gomuks--alist 'm.in_reply_to
-                   (gomuks--alist 'm.relates_to
-                                   (gomuks--event-content event)))))
+                  (gomuks--alist 'm.relates_to
+                                 (gomuks--event-content event)))))
 
 (defun gomuks--thread-root-id (event)
   "Return the root ID for EVENT's thread, or EVENT's own ID."
@@ -297,13 +407,15 @@ Preserve cached events, room metadata, and member indexes."
 
 (defun gomuks--find-event (room-id event-id)
   "Find EVENT-ID in ROOM-ID among cached events."
-  (catch 'found
-    (maphash (lambda (_rowid event)
-               (when (and (equal (gomuks--alist 'room_id event) room-id)
-                          (equal (gomuks--alist 'event_id event) event-id))
-                 (throw 'found event)))
-             gomuks--events)
-    nil))
+  (or (gethash (gethash (cons room-id event-id) gomuks--event-index)
+               gomuks--events)
+      (catch 'found
+	(maphash (lambda (_rowid event)
+		   (when (and (equal (gomuks--alist 'room_id event) room-id)
+                              (equal (gomuks--alist 'event_id event) event-id))
+                     (throw 'found event)))
+		 gomuks--events)
+	nil)))
 
 (defun gomuks--sender-name (id event)
   "Return EVENT's display name in room ID, falling back to its MXID localpart."
@@ -323,6 +435,53 @@ Preserve cached events, room metadata, and member indexes."
         (or sender "?")))))
 
 
+
+(defun gomuks--store-sync (sync)
+  "Write SYNC's domain state and return room IDs whose views need resetting.
+Do not touch buffers, issue requests or emit notifications."
+  (let ((reset (copy-sequence (gomuks--alist 'left_rooms sync))))
+    (when (gomuks--alist 'clear_state sync) (gomuks--reset-cache))
+    (when-let* ((rules (gomuks--alist 'm.push_rules
+                                      (gomuks--alist 'account_data sync))))
+      (clrhash gomuks--muted-rooms)
+      (dolist (rule (gomuks--alist 'room
+                                   (gomuks--alist 'global
+                                                  (gomuks--alist 'content rules))))
+        (when (and (gomuks--alist 'enabled rule)
+                   (not (member "notify" (gomuks--alist 'actions rule))))
+          (puthash (gomuks--alist 'rule_id rule) t gomuks--muted-rooms))))
+    (dolist (id (gomuks--alist 'left_rooms sync)) (gomuks--forget-room id))
+    (dolist (entry (gomuks--alist 'rooms sync))
+      (let* ((id (gomuks--key-string (car entry)))
+             (room (cdr entry)) (meta (gomuks--alist 'meta room)))
+        (when meta
+          (when (and (gomuks--alist 'marked_unread meta)
+                     (not (gomuks--alist 'marked_unread (gethash id gomuks--rooms))))
+            (remhash id gomuks--last-read))
+          (puthash id meta gomuks--rooms))
+        (gomuks--store-events (gomuks--alist 'events room))
+        (when-let* ((members (gomuks--alist 'm.room.member
+                                            (gomuks--alist 'state room))))
+          (let ((state (or (gethash id gomuks--member-state)
+                           (make-hash-table :test 'equal))))
+            (dolist (member members)
+              (when (cdr member)
+                (puthash (gomuks--key-string (car member)) (cdr member) state)))
+            (puthash id state gomuks--member-state)))
+        (when (gomuks--alist 'reset room)
+          (gomuks--reset-room-cache id) (push id reset))
+        (gomuks--store-timeline id (gomuks--alist 'timeline room))))
+    reset))
+
+(defun gomuks--store-decryption (data)
+  "Write decrypted events and any supplied room preview metadata from DATA."
+  (let ((id (gomuks--alist 'room_id data)))
+    (gomuks--store-events (gomuks--alist 'events data))
+    (when (assq 'preview_event_rowid data)
+      (let ((meta (copy-tree (gethash id gomuks--rooms))))
+        (setf (alist-get 'preview_event_rowid meta)
+              (gomuks--alist 'preview_event_rowid data))
+        (puthash id meta gomuks--rooms)))))
 
 (provide 'gomuks-core)
 ;;; gomuks-core.el ends here
