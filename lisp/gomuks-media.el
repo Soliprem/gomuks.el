@@ -14,6 +14,7 @@
 (require 'gomuks-content)
 (declare-function gomuks--update-room-views "gomuks-view" (id &optional incoming))
 (declare-function gomuks--event-at-point "gomuks-render")
+(declare-function gomuks--refresh-sticker-pickers "gomuks-stickers" (&optional id fetch))
 (declare-function empv-play "empv" (uri))
 (declare-function empv-toggle "empv" ())
 (declare-function empv-seek "empv" (target &optional type))
@@ -264,7 +265,9 @@ Coalesce consumers with the same transfer policy; isolate consumer failures."
            (cl-decf gomuks--preview-active)
            (unwind-protect
                (when (and path (gomuks--cache-current-p id token))
-                 (gomuks--update-room-views id))
+                 (gomuks--update-room-views id)
+                 (when (fboundp 'gomuks--refresh-sticker-pickers)
+                   (gomuks--refresh-sticker-pickers id)))
              (gomuks--drain-previews)))
          gomuks-inline-image-max-bytes)))))
 

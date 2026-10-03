@@ -7,7 +7,7 @@
   "Simulate acceptance followed by a separately correlated stream completion."
   (let* ((row (+ 10000 (cl-incf gomuks--send-serial)))
          (pending `((rowid . ,row) (transaction_id . ,(format "txn-%d" row))
-                    (event_id . ,(format "~txn-%d" row)))))
+                    (event_id . ,(format "~txn-%d" row)) (send_error . "not sent"))))
     (funcall callback nil pending)
     (gomuks--complete-send `((event . ,(cons `(event_id . ,(format "$sent-%d" row)) pending))))))
 
@@ -643,7 +643,8 @@
             (setq gomuks--room-id "!room:test")
             (let ((inhibit-read-only t))
               (gomuks--insert-event late))
-            (goto-char (point-min)))
+            (goto-char (point-min))
+            (search-forward "Late"))
           (switch-to-buffer room)
           (cl-letf (((symbol-function 'gomuks--post)
                      (lambda (command data callback)
@@ -1311,6 +1312,10 @@
          (gomuks--requested-members (make-hash-table :test 'equal))
          (gomuks--mention-members-loaded (make-hash-table :test 'equal))
          (gomuks--last-read (make-hash-table :test 'equal))
+         (gomuks--receipts (make-hash-table :test 'equal))
+         (gomuks--requested-receipts (make-hash-table :test 'equal))
+         (gomuks--account-data (make-hash-table :test 'equal))
+         (gomuks--image-pack-state (make-hash-table :test 'equal))
          (gomuks--muted-rooms (make-hash-table :test 'equal))
          (gomuks--cache-generation 0)
          (gomuks--room-generations (make-hash-table :test 'equal))
@@ -2250,6 +2255,24 @@ functions that start another request and read its current pending marker."
       (should (eq (not (null (car calls))) (equal body "invalid JSON")))
       (should-not (buffer-live-p response-buffer)))))
 
+(ert-deftest gomuks-http-failure-includes-backend-error-and-cleans-response ()
+  (dolist (case '(("{\"errcode\":\"FI.MAU.GOMUKS.COMMAND_ERROR\",\"error\":\"event was already sent successfully\"}"
+                  . "HTTP 418: event was already sent successfully")
+                 ("backend rejected request\n" . "HTTP 418: backend rejected request")
+                 ("" . "HTTP 418: (error http 418)")))
+    (let (calls response-buffer)
+      (cl-letf (((symbol-function 'url-retrieve)
+                 (lambda (_url callback &rest _)
+                   (setq response-buffer (generate-new-buffer " *gomuks-http-error-test*"))
+                   (with-current-buffer response-buffer
+                     (insert "HTTP/1.1 418 I'm a teapot\r\n\r\n" (car case))
+                     (setq-local url-http-response-status 418)
+                     (funcall callback '(:error (error http 418)))))))
+        (gomuks--request "test" "{}"
+                         (lambda (failure response) (push (cons failure response) calls))))
+      (should (equal calls (list (cons (cdr case) nil))))
+      (should-not (buffer-live-p response-buffer)))))
+
 (ert-deftest gomuks-member-lookup-outlives-source-view ()
   (dolist (kind '(missing mentions))
     (gomuks-test-with-member-request kind
@@ -2623,6 +2646,73 @@ functions that start another request and read its current pending marker."
        (should (eq (gomuks--send-phase gomuks--compose-job) 'queued)))
      (gomuks--complete-send '((event . ((rowid . 1) (transaction_id . "txn") (event_id . "$delivered")))))
      (should (string-empty-p (buffer-string))))))
+
+(ert-deftest gomuks-success-with-stale-send-error-allows-consecutive-messages ()
+  (dolist (completion '(before-ack after-ack in-ack))
+    (gomuks-test-with-state
+     (with-temp-buffer
+       (gomuks-compose-mode) (setq gomuks--room-id "!test")
+       (let ((row 0))
+         (cl-letf (((symbol-function 'gomuks--post)
+                    (lambda (command _data callback)
+                      (should (equal command "send_message"))
+                      (cl-incf row)
+                      (let* ((pending `((rowid . ,row)
+                                        (transaction_id . ,(format "txn%d" row))
+                                        (event_id . ,(format "~txn%d" row))
+                                        (send_error . "not sent")))
+                             (delivered (cons `(event_id . ,(format "$sent%d" row))
+                                              pending))
+                             (data `((event . ,delivered) (error . nil))))
+                        (when (eq completion 'before-ack) (gomuks--complete-send data))
+                        (funcall callback nil (if (eq completion 'in-ack) delivered pending))
+                        (when (eq completion 'after-ack) (gomuks--complete-send data))))))
+           (dolist (text '("first" "second"))
+             (insert text)
+             (gomuks-compose-send)
+             (should (string-empty-p (buffer-string)))
+             (should-not gomuks--compose-sending)
+             (should-not gomuks--compose-job)
+             (should (= (hash-table-count gomuks--sends) 0))))
+         (should (= row 2)))))))
+
+(ert-deftest gomuks-recovery-releases-already-delivered-send-and-preserves-new-draft ()
+  (gomuks-test-with-state
+   (with-temp-buffer
+     (gomuks-compose-mode) (setq gomuks--room-id "!test") (insert "second")
+     (let ((send (gomuks--make-send
+                  :id 1 :phase 'failed :buffer (current-buffer) :room "!test"
+                  :backend gomuks-backend-url :account gomuks--user-id :text "first"
+                  :token (gomuks--cache-token "!test")
+                  :failure "HTTP 418: (error http 418)"
+                  :event '((rowid . 1) (transaction_id . "txn")
+                           (event_id . "$sent") (send_error . "not sent")))))
+       (puthash 1 send gomuks--sends)
+       (setq gomuks--compose-job send)
+       (cl-letf (((symbol-function 'gomuks--post)
+                  (lambda (&rest _) (ert-fail "Delivered send must not be resent"))))
+         (gomuks-retry-send))
+       (should (eq (gomuks--send-phase send) 'delivered))
+       (should-not gomuks--compose-job)
+       (should-not gomuks--compose-sending)
+       (should (= (hash-table-count gomuks--sends) 0))
+       (should (equal (buffer-string) "second"))))))
+
+(ert-deftest gomuks-pending-delivery-error-retains-draft ()
+  (gomuks-test-with-state
+   (with-temp-buffer
+     (gomuks-compose-mode) (setq gomuks--room-id "!test") (insert "draft")
+     (cl-letf (((symbol-function 'gomuks--post)
+                (lambda (_command _data callback)
+                  (funcall callback nil '((rowid . 1) (transaction_id . "txn")
+                                          (event_id . "~txn"))))))
+       (gomuks-compose-send))
+     (gomuks--complete-send
+      '((event . ((rowid . 1) (transaction_id . "txn") (event_id . "~txn")
+                  (send_error . "failed to encrypt"))) (error . nil)))
+     (should (eq (gomuks--send-phase gomuks--compose-job) 'failed))
+     (should (equal (gomuks--send-failure gomuks--compose-job) "failed to encrypt"))
+     (should (equal (buffer-string) "draft")))))
 
 (ert-deftest gomuks-completion-before-ack-is-correlated-once ()
   (gomuks-test-with-state
@@ -3253,6 +3343,437 @@ functions that start another request and read its current pending marker."
                (should (eq (gethash 2 gomuks--sends) pending)))
              (when (buffer-live-p recovered) (kill-buffer recovered))
              (when (file-exists-p file) (delete-file file))))))))
+
+(ert-deftest gomuks-date-separators-use-local-days-and-break-sender-groups ()
+  (gomuks-test-with-state
+    (let* ((times (list (encode-time 0 58 23 3 10 2026)
+                        (encode-time 0 59 23 3 10 2026)
+                        (encode-time 0 1 0 4 10 2026)))
+           (events (cl-loop for time in times for row from 1
+                            collect `((rowid . ,row) (room_id . "!test")
+                                      (event_id . ,(format "$%d" row))
+                                      (sender . "@alice:test") (type . "m.room.message")
+                                      (timestamp . ,(* 1000 (float-time time)))
+                                      (content . ((body . ,(format "Message %d" row))))))))
+      (gomuks--store-events events)
+      (puthash "!test" '(1 2 3) gomuks--timelines)
+      (dolist (kind '(room thread context))
+        (with-temp-buffer
+          (gomuks-room-mode)
+          (setq gomuks--room-id "!test"
+                gomuks--thread-root (when (eq kind 'thread) "$root")
+                gomuks--thread-events '(1 2 3)
+                gomuks--context-target (when (eq kind 'context) "$target")
+                gomuks--context-events '(1 2 3))
+          (gomuks--render-buffer (current-buffer) "!test")
+          (should (string-match-p "23:59  │  Message 2" (buffer-string)))
+          (should (string-match-p "00:01  alice  Message 3" (buffer-string)))
+          (goto-char (point-min))
+          (let ((separators 0))
+            (while (re-search-forward "── .*2026-10-0[34] ──" nil t)
+              (cl-incf separators)
+              (should-not (get-text-property (match-beginning 0) 'gomuks-event-rowid))
+              (should-error (gomuks--event-at-point) :type 'user-error))
+            (should (= separators 2)))
+          ;; Prepending history must recompute the first day's separator.
+          (setq gomuks--thread-events '(2 3) gomuks--context-events '(2 3))
+          (puthash "!test" '(2 3) gomuks--timelines)
+          (gomuks--render-buffer (current-buffer) "!test")
+          (should (string-match-p "2026-10-03" (buffer-string)))
+          (puthash "!test" '(1 2 3) gomuks--timelines))))))
+
+(ert-deftest gomuks-date-separators-skip-hidden-and-undated-events ()
+  (gomuks-test-with-state
+    (with-temp-buffer
+      (let ((first '((sender . "@a:test") (timestamp . 1000)
+                     (type . "m.room.message") (content . ((body . "First")))))
+            (hidden '((timestamp . 86401000) (type . "m.reaction")))
+            (undated '((type . "m.room.encrypted") (sender . "@b:test"))))
+        (should (gomuks--insert-event first))
+        (should-not (gomuks--insert-event hidden first))
+        (should (gomuks--insert-event undated first))
+        (should (string-match-p "\\[encrypted\\]" (buffer-string)))
+        (should (= (cl-count ?─ (buffer-string)) 4))))))
+
+(ert-deftest gomuks-receipts-move-forward-and-attach-to-visible-messages ()
+  (gomuks-test-with-state
+    (setq gomuks--user-id "@self:test")
+    (gomuks--store-sync
+     '((rooms . (("!test" .
+                  ((events . (((rowid . 1) (room_id . "!test") (event_id . "$first")
+                               (type . "m.room.message") (sender . "@self:test")
+                               (content . ((body . "First"))))
+                              ((rowid . 2) (room_id . "!test") (event_id . "$hidden")
+                               (type . "m.reaction"))
+                              ((rowid . 3) (room_id . "!test") (event_id . "$last")
+                               (type . "m.room.message") (sender . "@self:test")
+                               (content . ((body . "Last"))))))
+                   (timeline . (((event_rowid . 1) (timeline_rowid . 11))
+                                ((event_rowid . 2) (timeline_rowid . 12))
+                                ((event_rowid . 3) (timeline_rowid . 13))))))))))
+    (gomuks--store-members
+     "!test" '(((rowid . 4) (room_id . "!test") (type . "m.room.member")
+                (state_key . "@alice:test") (content . ((displayname . "Alice"))))))
+    (gomuks--store-sync
+     '((rooms . (("!test" . ((receipts .
+                             (($hidden . (((user_id . "@alice:test") (receipt_type . "m.read")
+                                           (timestamp . 200))))
+                              ($first . (((user_id . "@private:test") (receipt_type . "m.read.private"))
+                                         ((user_id . "@self:test") (receipt_type . "m.read"))))))))))))
+    (with-temp-buffer
+      (gomuks-room-mode) (setq gomuks--room-id "!test")
+      (gomuks--render-buffer (current-buffer) "!test")
+      (should (string-match-p "First\n        Read by Alice\n.*Last" (buffer-string)))
+      (should-not (string-match-p "Read by .*self\\|Read by .*private" (buffer-string)))
+      ;; Timeline order wins even when a receipt's clock goes backwards.
+      (gomuks--store-receipts "!test"
+                             '(($last . (((user_id . "@alice:test") (receipt_type . "m.read")
+                                          (timestamp . 100))))))
+      (gomuks--store-receipts "!test"
+                             '(($first . (((user_id . "@alice:test") (receipt_type . "m.read")
+                                           (timestamp . 300))))))
+      (gomuks--render-buffer (current-buffer) "!test")
+      (should (string-match-p "Last\n        Read by Alice" (buffer-string)))
+      (should-not (string-match-p "First\n        Read by" (buffer-string))))))
+
+(ert-deftest gomuks-receipts-keep-thread-positions-separate ()
+  (gomuks-test-with-state
+    (gomuks--store-events
+     '(((rowid . 1) (room_id . "!test") (event_id . "$main")
+        (type . "m.room.message") (content . ((body . "Main"))))
+       ((rowid . 2) (room_id . "!test") (event_id . "$reply")
+        (type . "m.room.message") (content . ((body . "Reply"))))))
+    (gomuks--store-receipts
+     "!test" '(($main . (((user_id . "@a:test") (receipt_type . "m.read")
+                          (thread_id . "main") (timestamp . 10))))
+               ($reply . (((user_id . "@a:test") (receipt_type . "m.read")
+                           (thread_id . "$root") (timestamp . 20))))))
+    (with-temp-buffer
+      (setq gomuks--room-id "!test")
+      (let ((events (gomuks--events-for-rows '(1 2))))
+        (should (equal (gethash "$main" (gomuks--readers-for-events "!test" events)) '("@a:test")))
+        (should-not (gethash "$reply" (gomuks--readers-for-events "!test" events)))
+        (setq gomuks--thread-root "$root")
+        (should (equal (gethash "$reply" (gomuks--readers-for-events "!test" events)) '("@a:test")))
+        (should-not (gethash "$main" (gomuks--readers-for-events "!test" events)))))))
+
+(ert-deftest gomuks-receipt-lookups-coalesce-and-reject-old-cache-responses ()
+  (gomuks-test-with-state
+    (let ((events '(((event_id . "$one")) ((event_id . "~pending")) ((event_id . "$one"))))
+          (calls 0) callback)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'gomuks--post)
+                 (lambda (command data complete)
+                   (should (equal command "get_receipts"))
+                   (should (equal (gomuks--alist 'event_ids data) ["$one"]))
+                   (cl-incf calls) (setq callback complete))))
+        (gomuks--request-receipts "!test" events)
+        (gomuks--request-receipts "!test" events)
+        (should (= calls 1))
+        (funcall callback "offline" nil)
+        (gomuks--request-receipts "!test" events)
+        (should (= calls 2))
+        (gomuks--reset-room-cache "!test")
+        (funcall callback nil '(($one . (((user_id . "@a:test") (receipt_type . "m.read"))))))
+        (should-not (gethash "!test" gomuks--receipts))
+        (should (= (hash-table-count gomuks--requested-receipts) 0))))))
+
+(ert-deftest gomuks-history-keeps-receipts-and-marks-snapshots-loaded ()
+  (gomuks-test-with-state
+    (with-temp-buffer
+      (gomuks-room-mode) (setq gomuks--room-id "!test")
+      (cl-letf (((symbol-function 'gomuks--post)
+                 (lambda (_command _data complete)
+                   (funcall complete nil
+                            '((events . (((rowid . 1) (room_id . "!test")
+                                          (event_id . "$one") (timeline_rowid . 11))))
+                              (receipts . (($one . (((user_id . "@a:test") (receipt_type . "m.read"))))))
+                              (has_more . nil))))))
+        (gomuks-load-history))
+      (should (equal (gomuks--alist 'event_id
+                                   (gethash '("@a:test" nil) (gethash "!test" gomuks--receipts)))
+                     "$one"))
+      (should (gethash '("!test" . "$one") gomuks--requested-receipts)))))
+
+(defun gomuks-test-pack (row room key name images &optional type usage)
+  "Make one image pack state event for catalogue tests."
+  `((rowid . ,row) (room_id . ,room) (state_key . ,key)
+    (type . ,(or type "m.room.image_pack"))
+    (content . ((pack . ((display_name . ,name) (usage . ,usage)))
+                (images . ,images)))))
+
+(ert-deftest gomuks-stickers-use-synced-subscriptions-and-image-usage ()
+  (gomuks-test-with-state
+    (gomuks--store-sync
+     '((account_data . ((im.ponies.emote_rooms . ((content . ((rooms . (("!remote" . (("cats" . nil)))))))))))))
+    (gomuks--store-image-packs
+     (list (gomuks-test-pack 1 "!remote" "cats" "Cats"
+                            '((wave . ((url . "mxc://test/wave") (body . "Wave") (usage . ("sticker"))))
+                              (alias . ((url . "mxc://test/wave") (usage . ("sticker"))))
+                              (emoji . ((url . "mxc://test/emoji")))
+                              (bad . ((url . "https://example.org/image"))))
+                            "im.ponies.room_emotes" '("emoticon"))
+           (gomuks-test-pack 2 "!local" "" "Local"
+                            '((hello . ((url . "mxc://test/hello")))))
+           (gomuks-test-pack 3 "!other" "" "Unsubscribed"
+                            '((no . ((url . "mxc://test/no")))))))
+    (let ((packs (gomuks--sticker-packs "!local")))
+      (should (equal (mapcar #'cadr packs) '("Cats" "Local")))
+      (should (equal (mapcar (lambda (image) (gomuks--alist 'url image)) (cddar packs))
+                     '("mxc://test/wave"))))
+    (gomuks--store-image-packs
+     (list (gomuks-test-pack 4 "!remote" "cats" "Modern Cats"
+                            '((new . ((url . "mxc://test/new")))))))
+    (should (equal (mapcar #'cadr (gomuks--sticker-packs "!local")) '("Local" "Modern Cats")))
+    ;; A present, empty modern subscription list replaces the legacy list.
+    (gomuks--store-sync '((account_data . ((m.image_pack.rooms . ((content . nil)))))))
+    (should (equal (mapcar #'cadr (gomuks--sticker-packs "!local")) '("Local")))))
+
+(ert-deftest gomuks-pack-sync-updates-state-and-removes-redacted-packs ()
+  (gomuks-test-with-state
+    (let ((old (gomuks-test-pack 1 "!test" "" "Old" '((a . ((url . "mxc://test/a"))))))
+          (new (gomuks-test-pack 2 "!test" "" "New" '((b . ((url . "mxc://test/b")))))))
+      (gomuks--store-sync `((rooms . (("!test" . ((events . (,old))
+                                                 (state . ((m.room.image_pack . (("" . 1)))))))))))
+      (gomuks--store-sync `((rooms . (("!test" . ((events . (,new))
+                                                 (state . ((m.room.image_pack . (("" . 2)))))))))))
+      (gomuks--store-image-packs (list old) t)
+      (should (equal (cadar (gomuks--sticker-packs "!test")) "New"))
+      (setf (alist-get 'redacted_by new) "$redaction")
+      (gomuks--store-events (list new))
+      (should-not (gomuks--sticker-packs "!test"))
+      (gomuks--forget-room "!test")
+      (should-not (gethash "!test" gomuks--image-pack-state)))))
+
+(ert-deftest gomuks-picker-fetches-subscribed-packs-and-sends-without-uploading ()
+  (gomuks-test-with-state
+    (save-window-excursion
+      (let ((source (generate-new-buffer " *gomuks-sticker-source*"))
+            (picker-name "*Gomuks stickers: !test*") requests payload)
+        (unwind-protect
+            (progn
+              (gomuks--store-sync
+               '((account_data . ((m.image_pack.rooms . ((content . ((rooms . (("!packs" . (("cats" . nil)))))))))))))
+              (with-current-buffer source
+                (gomuks-compose-mode)
+                (setq gomuks--room-id "!test"
+                      gomuks--compose-relation '((rel_type . "m.thread") (event_id . "$root")))
+                (insert "Unsent draft"))
+              (switch-to-buffer source)
+              (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) nil))
+                        ((symbol-function 'gomuks--upload-file) (lambda (&rest _) (ert-fail "uploaded an existing sticker")))
+                        ((symbol-function 'gomuks--post)
+                         (lambda (command data complete)
+                           (push command requests)
+                           (pcase command
+                             ("get_room_state" (funcall complete nil nil))
+                             ("get_specific_room_state"
+                              (should (= (length (gomuks--alist 'keys data)) 2))
+                              (funcall complete nil
+                                       (list (gomuks-test-pack
+                                              1 "!packs" "cats" "Cats"
+                                              '((wave . ((body . "Wave") (url . "mxc://test/wave")
+                                                         (info . ((mimetype . "image/png") (w . 128) (h . 128))))))))))
+                             ("send_message" (setq payload data) (gomuks-test-confirm-delivery complete))
+                             (_ (ert-fail (format "Unexpected command %s" command)))))))
+                (gomuks-pick-sticker)
+                (should (derived-mode-p 'gomuks-stickers-mode))
+                (should (= gomuks--sticker-loading 0))
+                (goto-char (point-min))
+                (call-interactively (key-binding (kbd "TAB")))
+                (should (equal (button-label (button-at (point))) "▸ Cats (1)"))
+                (should (save-excursion (search-forward "Wave") (invisible-p (1- (point)))))
+                (call-interactively (key-binding (kbd "TAB")))
+                (call-interactively (key-binding (kbd "n")))
+                (should (equal (button-label (button-at (point))) "Wave"))
+                (call-interactively (key-binding (kbd "RET"))))
+              (should (equal (sort requests #'string-lessp)
+                             '("get_room_state" "get_specific_room_state" "send_message")))
+              (should (equal (gomuks--alist 'text payload) ""))
+              (should (equal (gomuks--alist 'msgtype (gomuks--alist 'base_content payload)) "m.sticker"))
+              (should (equal (gomuks--alist 'url (gomuks--alist 'base_content payload)) "mxc://test/wave"))
+              (should (= (gomuks--alist 'w (gomuks--alist 'info (gomuks--alist 'base_content payload))) 128))
+              (should (equal (gomuks--alist 'relates_to payload) '((rel_type . "m.thread") (event_id . "$root"))))
+              (should (equal (with-current-buffer source (buffer-string)) "Unsent draft"))
+              (should (= (hash-table-count gomuks--sends) 0)))
+          (kill-buffer source)
+          (when-let* ((picker (get-buffer picker-name))) (kill-buffer picker)))))))
+
+(ert-deftest gomuks-picker-rejects-responses-and-sends-after-source-reset ()
+  (gomuks-test-with-state
+    (save-window-excursion
+      (let ((source (generate-new-buffer " *gomuks-sticker-stale-source*")) callback)
+        (unwind-protect
+            (progn
+              (with-current-buffer source (gomuks-room-mode) (setq gomuks--room-id "!test"))
+              (switch-to-buffer source)
+              (cl-letf (((symbol-function 'gomuks--post)
+                         (lambda (_command _data complete) (setq callback complete))))
+                (gomuks-pick-sticker))
+              (gomuks--reset-room-cache "!test")
+              (funcall callback nil
+                       (list (gomuks-test-pack 1 "!test" "" "Stale" '((a . ((url . "mxc://test/a")))))))
+              (should-not (gethash "!test" gomuks--image-pack-state))
+              (should-error (gomuks--send-picked-sticker '((url . "mxc://test/a"))) :type 'user-error))
+          (kill-buffer source)
+          (when-let* ((picker (get-buffer "*Gomuks stickers: !test*"))) (kill-buffer picker)))))))
+
+(ert-deftest gomuks-picker-refreshes-cached-packs-without-overwriting-new-sync ()
+  (gomuks-test-with-state
+    (save-window-excursion
+      (let ((source (generate-new-buffer " *gomuks-sticker-refresh-source*")) callback)
+        (unwind-protect
+            (progn
+              (gomuks--store-image-packs
+               (list (gomuks-test-pack 1 "!test" "" "Old" '((a . ((url . "mxc://test/a")))))))
+              (with-current-buffer source (gomuks-room-mode) (setq gomuks--room-id "!test"))
+              (switch-to-buffer source)
+              (cl-letf (((symbol-function 'gomuks--post)
+                         (lambda (_command _data complete) (setq callback complete))))
+                (gomuks-pick-sticker)
+                (funcall callback nil
+                         (list (gomuks-test-pack 2 "!test" "" "Refreshed" '((b . ((url . "mxc://test/b")))))))
+                (should (equal (cadar (gomuks--sticker-packs "!test")) "Refreshed"))
+                (gomuks-stickers-refresh)
+                (gomuks--store-image-packs
+                 (list (gomuks-test-pack 3 "!test" "" "New sync" '((c . ((url . "mxc://test/c")))))))
+                (funcall callback nil
+                         (list (gomuks-test-pack 2 "!test" "" "Stale response" '((b . ((url . "mxc://test/b")))))))
+                (should (equal (cadar (gomuks--sticker-packs "!test")) "New sync"))))
+          (kill-buffer source)
+          (when-let* ((picker (get-buffer "*Gomuks stickers: !test*"))) (kill-buffer picker)))))))
+
+(ert-deftest gomuks-picker-loads-new-subscriptions-while-open ()
+  (gomuks-test-with-state
+    (save-window-excursion
+      (let ((source (generate-new-buffer " *gomuks-sticker-sync-source*")) (lookups 0))
+        (unwind-protect
+            (progn
+              (with-current-buffer source (gomuks-room-mode) (setq gomuks--room-id "!test"))
+              (switch-to-buffer source)
+              (cl-letf (((symbol-function 'gomuks--post)
+                         (lambda (command _data complete)
+                           (if (equal command "get_room_state") (funcall complete nil nil)
+                             (should (equal command "get_specific_room_state"))
+                             (cl-incf lookups)
+                             (funcall complete nil
+                                      (list (gomuks-test-pack 1 "!new" "cats" "New cats"
+                                                             '((a . ((url . "mxc://test/a")))))))))))
+                (gomuks-pick-sticker)
+                (should (string-match-p "No sticker packs" (buffer-string)))
+                (gomuks--apply-sync
+                 '((account_data . ((m.image_pack.rooms . ((content . ((rooms . (("!new" . (("cats" . nil)))))))))))))
+                (should (= lookups 1))
+                (should (string-match-p "New cats" (buffer-string)))))
+          (kill-buffer source)
+          (when-let* ((picker (get-buffer "*Gomuks stickers: !test*"))) (kill-buffer picker)))))))
+
+(ert-deftest gomuks-picker-preserves-independent-folds-and-skips-hidden-buttons ()
+  (gomuks-test-with-state
+    (let ((source (generate-new-buffer " *gomuks-sticker-fold-source*"))
+          (gomuks-inline-images t)
+          (images 0))
+      (unwind-protect
+          (progn
+            (with-current-buffer source (gomuks-room-mode) (setq gomuks--room-id "!test"))
+            (gomuks--store-image-packs
+             (list (gomuks-test-pack 1 "!test" "a" "Same name"
+                                     '((a . ((body . "Sticker A") (url . "mxc://test/a")))))
+                   (gomuks-test-pack 2 "!test" "b" "Same name"
+                                     '((b . ((body . "Sticker B") (url . "mxc://test/b")))))))
+            (with-temp-buffer
+              (gomuks-stickers-mode)
+              (setq gomuks--room-id "!test" gomuks--sticker-source source
+                    gomuks--sticker-source-view (with-current-buffer source (gomuks--view-identity))
+                    gomuks--sticker-token (gomuks--cache-token "!test"))
+              (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                        ((symbol-function 'gomuks--cached-media) (lambda (_) "/cached/sticker.png"))
+                        ((symbol-function 'gomuks--preview-file-p) (lambda (_) t))
+                        ((symbol-function 'create-image)
+                         (lambda (&rest _) (cl-incf images) '(image :type png :file "/cached/sticker.png"))))
+                (gomuks--render-stickers)
+                (should outline-minor-mode)
+                (should (= images 0))
+                (goto-char (point-min))
+                (gomuks-stickers-next-button)
+                (let* ((first-key (get-text-property (point) 'gomuks-sticker-pack-key))
+                       (first-name (if (equal (cdr first-key) "a") "Sticker A" "Sticker B"))
+                       (other-name (if (equal first-name "Sticker A") "Sticker B" "Sticker A")))
+                  ;; Identical names still have independent folds; navigation skips their children.
+                  (gomuks-stickers-next-button)
+                  (should-not (equal first-key (get-text-property (point) 'gomuks-sticker-pack-key)))
+                  (gomuks-stickers-previous-button)
+                  (should (equal first-key (get-text-property (point) 'gomuks-sticker-pack-key)))
+                  (gomuks-stickers-tab)
+                  (should (= images 1))
+                  (should (equal gomuks--expanded-sticker-packs (list first-key)))
+                  (let ((folds (length (overlays-in (point-min) (point-max)))))
+                    ;; Preview completions and metadata refreshes use this same redraw.
+                    (gomuks--render-stickers)
+                    (should (= folds (length (overlays-in (point-min) (point-max))))))
+                  (should (save-excursion (search-forward first-name) (not (invisible-p (1- (point))))))
+                  (should (save-excursion (search-forward other-name) (invisible-p (1- (point)))))
+                  (gomuks-stickers-activate)
+                  (should (= images 2))
+                  (should-not gomuks--expanded-sticker-packs)
+                  (should (save-excursion (search-forward "Sticker A") (invisible-p (1- (point)))))
+                  (should (save-excursion (search-forward "Sticker B") (invisible-p (1- (point)))))))))
+        (kill-buffer source)))))
+
+(ert-deftest gomuks-picker-renders-without-effects-and-previews-only-visible-stickers ()
+  (gomuks-test-with-state
+    (save-window-excursion
+      (let ((source (generate-new-buffer " *gomuks-sticker-preview-source*"))
+            (picker (generate-new-buffer " *gomuks-sticker-preview*"))
+            (gomuks--media-cache (make-hash-table :test 'equal))
+            (gomuks--media-pending (make-hash-table :test 'equal))
+            (gomuks--media-failures (make-hash-table :test 'equal))
+            (gomuks-preview-concurrency 2)
+            started)
+        (unwind-protect
+            (progn
+              (with-current-buffer source (gomuks-room-mode) (setq gomuks--room-id "!test"))
+              (gomuks--store-image-packs
+               (list (gomuks-test-pack 2 "!test" "hidden" "A hidden pack"
+                                       '((hidden . ((url . "mxc://test/hidden")))))
+                     (gomuks-test-pack
+                      1 "!test" "" "Many stickers"
+                      (cl-loop for i below 80
+                               collect (cons (intern (format "sticker-%d" i))
+                                             `((url . ,(format "mxc://test/%d" i))))))))
+              (with-current-buffer picker
+                (gomuks-stickers-mode)
+                (setq gomuks--room-id "!test" gomuks--sticker-source source
+                      gomuks--sticker-source-view (with-current-buffer source (gomuks--view-identity))
+                      gomuks--sticker-token (gomuks--cache-token "!test")))
+              (switch-to-buffer picker)
+              (cl-letf (((symbol-function 'gomuks--fetch-media)
+                         (lambda (&rest _) (ert-fail "renderer started a preview")))
+                        ((symbol-function 'gomuks--post)
+                         (lambda (&rest _) (ert-fail "renderer requested metadata"))))
+                (gomuks--render-stickers))
+              (goto-char (point-min))
+              (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                        ((symbol-function 'window-end)
+                         (lambda (&rest _)
+                           (save-excursion (goto-char (point-min)) (forward-line 12) (point))))
+                        ((symbol-function 'gomuks--fetch-media)
+                         (lambda (attachment _complete limit)
+                           (should (= limit gomuks-inline-image-max-bytes))
+                           (push (plist-get attachment :mxc) started))))
+                (gomuks--preview-visible-stickers)
+                (should-not started)
+                (should-not gomuks--preview-queue)
+                (search-forward "Many stickers")
+                (gomuks-stickers-toggle-pack))
+              (should (= (length started) 2))
+              (should (< (+ (length started) (length gomuks--preview-queue)) 80))
+              (should-not (member "mxc://test/79" started))
+              (should-not (member "mxc://test/hidden" started))
+              (should-not (cl-find "mxc://test/79" gomuks--preview-queue
+                                   :key (lambda (item) (plist-get (car item) :mxc)) :test #'equal)))
+          (kill-buffer source)
+          (kill-buffer picker))))))
 
 (provide 'gomuks-tests)
 ;;; gomuks-tests.el ends here

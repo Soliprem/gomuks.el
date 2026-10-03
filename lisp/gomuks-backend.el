@@ -22,6 +22,7 @@
 (declare-function gomuks--cancel-operations "gomuks-transport" ())
 (declare-function gomuks--disconnect-sends "gomuks-send" ())
 (declare-function gomuks--clear-media-cache "gomuks-media" ())
+(declare-function gomuks--refresh-sticker-pickers "gomuks-stickers" (&optional id fetch))
 
 (defun gomuks--url (path)
   "Return the backend URL for relative API PATH."
@@ -161,6 +162,10 @@
     (gomuks--update-room-views (gomuks--key-string (car entry))
                                (gomuks--alist 'events (cdr entry))))
   (gomuks--render-rooms)
+  (when (fboundp 'gomuks--refresh-sticker-pickers)
+    (gomuks--refresh-sticker-pickers
+     nil (or (assq 'm.image_pack.rooms (gomuks--alist 'account_data sync))
+             (assq 'im.ponies.emote_rooms (gomuks--alist 'account_data sync)))))
   (gomuks--maybe-mark-read)
   (dolist (entry (gomuks--alist 'rooms sync))
     (let ((id (gomuks--key-string (car entry))))

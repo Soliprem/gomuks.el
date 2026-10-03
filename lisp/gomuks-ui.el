@@ -13,6 +13,7 @@
 (require 'gomuks-view)
 (require 'gomuks-search)
 (require 'gomuks-reactions)
+(require 'gomuks-stickers)
 (declare-function gomuks-quit "gomuks")
 (declare-function gomuks-reconnect "gomuks")
 (declare-function evil-set-initial-state "evil-core")
@@ -37,7 +38,7 @@
 (define-key gomuks-room-mode-map (kbd "C-c C-h") #'gomuks-switch-hidden-room)
 (define-key gomuks-room-mode-map (kbd "C-c C-x") #'gomuks-toggle-hidden-room)
 (define-key gomuks-room-mode-map (kbd "C-c C-a") #'gomuks-send-file)
-(define-key gomuks-room-mode-map (kbd "C-c C-p") #'gomuks-send-sticker)
+(define-key gomuks-room-mode-map (kbd "C-c C-p") #'gomuks-pick-sticker)
 (define-key gomuks-room-mode-map (kbd "C-c C-g") #'gomuks-send-gif)
 (define-key gomuks-room-mode-map (kbd "C-c C-o") #'gomuks-open-attachment)
 (define-key gomuks-room-mode-map (kbd "C-c C-w") #'gomuks-save-attachment)
@@ -72,7 +73,7 @@
     (define-key map (kbd "C-c C-o") #'gomuks-compose-preview-attachment)
     map)
   "Keymap for Gomuks message composer buffers.")
-(define-key gomuks-compose-mode-map (kbd "C-c C-p") #'gomuks-send-sticker)
+(define-key gomuks-compose-mode-map (kbd "C-c C-p") #'gomuks-pick-sticker)
 (define-key gomuks-compose-mode-map (kbd "C-c C-g") #'gomuks-send-gif)
 (define-key gomuks-compose-mode-map (kbd "C-c C-e") #'gomuks-insert-emoji)
 (define-key gomuks-compose-mode-map (kbd "C-c C-v") #'gomuks-paste-image)
@@ -87,7 +88,7 @@
    '(map! :map gomuks-room-mode-map :localleader
           "s" #'gomuks-compose
           "a" #'gomuks-send-file
-          "p" #'gomuks-send-sticker
+          "p" #'gomuks-pick-sticker
           "g" #'gomuks-send-gif
           "o" #'gomuks-open-attachment
           "SPC" #'gomuks-audio-toggle
@@ -110,7 +111,7 @@
           "a" #'gomuks-send-file
           "d" #'gomuks-compose-remove-attachment
           "o" #'gomuks-compose-preview-attachment
-          "p" #'gomuks-send-sticker
+          "p" #'gomuks-pick-sticker
           "g" #'gomuks-send-gif
           "e" #'gomuks-insert-emoji
           "n" #'gomuks-toggle-mute
@@ -176,6 +177,7 @@
   (evil-set-initial-state 'gomuks-search-mode 'normal)
   (evil-set-initial-state 'gomuks-reactions-mode 'normal)
   (evil-set-initial-state 'gomuks-attachment-preview-mode 'normal)
+  (evil-set-initial-state 'gomuks-stickers-mode 'normal)
   (evil-define-key* 'normal gomuks-rooms-mode-map
 		    (kbd "RET") #'gomuks-open-room
 		    (kbd "o") #'gomuks-open-room
@@ -202,7 +204,7 @@
 		    (kbd "T") #'gomuks-open-thread
 		    (kbd "J") #'gomuks-follow-reply
 		    (kbd "C-c C-f") #'gomuks-search
-		    (kbd "C-c C-p") #'gomuks-send-sticker
+		    (kbd "C-c C-p") #'gomuks-pick-sticker
 		    (kbd "C-c C-g") #'gomuks-send-gif
 		    (kbd "o") #'gomuks-open-attachment
 		    (kbd "d") nil
@@ -220,7 +222,7 @@
 		    (kbd "C-c C-a") #'gomuks-send-file
 		    (kbd "C-c C-d") #'gomuks-compose-remove-attachment
 		    (kbd "C-c C-n") #'gomuks-toggle-mute
-		    (kbd "C-c C-p") #'gomuks-send-sticker
+		    (kbd "C-c C-p") #'gomuks-pick-sticker
 		    (kbd "C-c C-g") #'gomuks-send-gif
 		    (kbd "C-c C-e") #'gomuks-insert-emoji
 		    (kbd "C-c C-v") #'gomuks-paste-image
@@ -241,7 +243,15 @@
   (evil-define-key* '(normal motion) gomuks-attachment-preview-mode-map
 		    (kbd "RET") #'gomuks-attachment-preview-open
 		    (kbd "d") #'gomuks-attachment-preview-remove
-		    (kbd "q") #'quit-window))
+		    (kbd "q") #'quit-window)
+  (evil-define-key* '(normal motion) gomuks-stickers-mode-map
+                    (kbd "RET") #'gomuks-stickers-activate
+                    (kbd "TAB") #'gomuks-stickers-tab
+                    (kbd "<backtab>") #'gomuks-stickers-previous-button
+                    (kbd "n") #'gomuks-stickers-next-button
+                    (kbd "p") #'gomuks-stickers-previous-button
+                    (kbd "g r") #'gomuks-stickers-refresh
+                    (kbd "q") #'quit-window))
 
 (add-hook 'window-buffer-change-functions #'gomuks--refresh-visible-views)
 

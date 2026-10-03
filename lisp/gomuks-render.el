@@ -157,11 +157,12 @@ Remove the quoted reply fallback for EVENT before rendering."
 
 (defun gomuks--event-at-point ()
   "Return the message event at point, or signal a user error."
-  (or (gethash (or (get-text-property (point) 'gomuks-event-rowid)
-                   (get-text-property (max (point-min) (1- (point))) 'gomuks-event-rowid))
-               gomuks--events)
-      (get-text-property (point) 'gomuks-event)
-      (get-text-property (max (point-min) (1- (point))) 'gomuks-event)
+  (or (unless (get-text-property (point) 'gomuks-date)
+        (or (gethash (or (get-text-property (point) 'gomuks-event-rowid)
+                        (get-text-property (max (point-min) (1- (point))) 'gomuks-event-rowid))
+                    gomuks--events)
+            (get-text-property (point) 'gomuks-event)
+            (get-text-property (max (point-min) (1- (point))) 'gomuks-event)))
       (user-error "No message on this line")))
 
 (defun gomuks--buttonize-urls (start end)
@@ -223,9 +224,45 @@ Remove the quoted reply fallback for EVENT before rendering."
           (error nil))))
     nil))
 
-(defun gomuks--insert-event (event &optional previous thread-counts)
+(defun gomuks--event-date (event)
+  "Return EVENT's local calendar date, or nil without a timestamp."
+  (when-let* ((timestamp (gomuks--alist 'timestamp event))
+              ((numberp timestamp)))
+    (format-time-string "%Y-%m-%d" (seconds-to-time (/ timestamp 1000.0)))))
+
+(defun gomuks--readers-for-events (id events)
+  "Map displayed event IDs to readers in room ID's EVENTS.
+Receipts on hidden events attach to the preceding visible message."
+  (let ((positions (make-hash-table :test 'equal))
+        (readers (make-hash-table :test 'equal)) previous)
+    (dolist (event events)
+      (let* ((content (gomuks--effective-content event))
+             (event-id (gomuks--alist 'event_id event)))
+        (when (or (gomuks--alist 'redacted_by event)
+                  (gomuks--alist 'body content)
+                  (gomuks--formatted-body content event)
+                  (gomuks--attachment content event)
+                  (equal (or (gomuks--alist 'decrypted_type event)
+                             (gomuks--alist 'type event)) "m.room.encrypted"))
+          (setq previous event-id))
+        (when event-id (puthash event-id previous positions))))
+    (when-let* ((state (gethash id gomuks--receipts)))
+      (maphash
+       (lambda (_key receipt)
+         (let* ((user (gomuks--alist 'user_id receipt))
+                (thread (gomuks--alist 'thread_id receipt))
+                (position (gethash (gomuks--alist 'event_id receipt) positions)))
+           (when (and position (not (equal user gomuks--user-id))
+                      (or (null thread) (equal thread "")
+                          (equal thread (or gomuks--thread-root "main"))))
+             (cl-pushnew user (gethash position readers) :test #'equal))))
+       state))
+    readers))
+
+(defun gomuks--insert-event (event &optional previous thread-counts readers)
   "Insert EVENT, grouping it after PREVIOUS when appropriate.
-THREAD-COUNTS maps thread root IDs to known reply counts."
+THREAD-COUNTS maps thread root IDs to known reply counts.
+READERS maps displayed event IDs to the users who read up to them."
   (let* ((content (gomuks--effective-content event))
          (attachment (unless (gomuks--alist 'redacted_by event)
                        (gomuks--attachment content event)))
@@ -245,10 +282,22 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
              (name (gomuks--sender-name gomuks--room-id event))
              (timestamp (gomuks--alist 'timestamp event))
              (previous-time (gomuks--alist 'timestamp previous))
+             (date (gomuks--event-date event))
+             (previous-date (gomuks--event-date previous))
              (grouped (and previous (equal sender (gomuks--alist 'sender previous))
                            (equal name (gomuks--sender-name gomuks--room-id previous))
+                           (equal date previous-date)
                            (numberp timestamp) (numberp previous-time)
                            (<= 0 (- timestamp previous-time) (* 15 60 1000)))))
+        (when (and date (not (equal date previous-date)))
+          (insert (propertize
+                   (concat "\n── "
+                           (format-time-string "%A, %Y-%m-%d"
+                                               (seconds-to-time (/ timestamp 1000.0)))
+                           " ──\n\n")
+                   'face 'shadow 'gomuks-date date
+                   'gomuks-event nil 'gomuks-event-rowid nil)))
+        (setq start (point))
         (insert (propertize
                  (if timestamp
                      (format-time-string "%H:%M"
@@ -310,6 +359,16 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                'face 'link 'follow-link t
                'action (lambda (_button) (gomuks-open-thread event)))
               (insert "\n"))))
+        (when-let* ((users (and readers (gethash (gomuks--alist 'event_id event) readers))))
+          (insert "        "
+                  (propertize
+                   (concat "Read by "
+                           (mapconcat (lambda (user)
+                                        (gomuks--sender-name gomuks--room-id
+                                                             `((sender . ,user))))
+                                      (sort (copy-sequence users) #'string-lessp) ", "))
+                   'face 'shadow 'help-echo (string-join users ", "))
+                  "\n"))
         (unless (bolp) (insert "\n"))
         (put-text-property start (point) 'gomuks-event event)
         (put-text-property start (point) 'gomuks-event-rowid
@@ -362,6 +421,7 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                                                          'gomuks-event-rowid)))
                               (get-buffer-window-list buffer nil t)))
              (thread-counts (when (eq kind 'room) (gomuks--thread-counts id)))
+             (readers (gomuks--readers-for-events id events))
              (previous nil))
         (setq-local header-line-format (gomuks--room-header id kind))
         (erase-buffer)
@@ -378,7 +438,7 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                 " open   " (propertize "D" 'face 'help-key-binding)
                 " save\n\n")
         (dolist (event events)
-          (when (gomuks--insert-event event previous thread-counts)
+          (when (gomuks--insert-event event previous thread-counts readers)
             (setq previous event)))
         (cond
          (at-end (goto-char (point-max)))

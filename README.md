@@ -81,6 +81,7 @@ web page.
 | Room                            | `d d`               | Redact the message at point, after confirmation             |
 | Room                            | `C-c C-m`           | Mark read at point                                          |
 | Room or composer                | `C-c C-n`           | Mute or unmute this room                                    |
+| Room or composer                | `C-c C-p`           | Select a sticker from synced packs                          |
 | Room                            | `C-c C-t`           | Open thread at point                                        |
 | Room                            | `C-c C-j`           | Follow reply at point                                       |
 | Room                            | `C-c C-f`           | Search this room                                            |

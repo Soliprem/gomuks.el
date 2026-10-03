@@ -43,6 +43,11 @@
   "Transform EVENT into its delivery correlation key."
   (or (gomuks--alist 'transaction_id event) (gomuks--alist 'rowid event)))
 
+(defun gomuks--send-delivered-p (event)
+  "Return non-nil when EVENT has a confirmed, non-local event ID."
+  (let ((id (gomuks--alist 'event_id event)))
+    (and (stringp id) (not (string-empty-p id)) (not (string-prefix-p "~" id)))))
+
 (defun gomuks--send-record-event (send event &optional stream)
   "Procedure: commit EVENT and invalidate once; return non-nil when committed.
 STREAM may update a known room independently of SEND's cache lifetime.
@@ -127,15 +132,17 @@ This owns mutable workflow state; it is not a pure transformation."
              (progn
                (setq gomuks--early-completions (delq completed gomuks--early-completions))
                (gomuks--send-step send 'delivery completed))
-           (when-let* ((id (gomuks--alist 'event_id value)))
-             (unless (string-prefix-p "~" id)
-               (gomuks--send-step send 'delivery `((event . ,value)))))))))
+           (when (gomuks--send-delivered-p value)
+             (gomuks--send-step send 'delivery `((event . ,value))))))))
       ((and `(,phase . ,(or 'delivery 'stored-delivery))
             (guard (memq phase '(queued uncertain failed checking))))
        (when (gomuks--send-timer send) (cancel-timer (gomuks--send-timer send)))
        (let ((event (gomuks--alist 'event value))
-             (error (or (gomuks--alist 'error value)
-                        (gomuks--alist 'send_error (gomuks--alist 'event value))))
+             ;; Gomuks may retain "not sent" in send_error even after success.
+             ;; A server-assigned event ID confirms delivery despite that field.
+             (error (unless (gomuks--send-delivered-p (gomuks--alist 'event value))
+                      (or (gomuks--alist 'error value)
+                          (gomuks--alist 'send_error (gomuks--alist 'event value)))))
              (buffer (gomuks--send-buffer send)))
          (setf (gomuks--send-event send) event)
          (unless (eq action 'stored-delivery) (gomuks--send-record-event send event))
@@ -158,8 +165,7 @@ This owns mutable workflow state; it is not a pure transformation."
       (`(checking . checked)
        (cond
         (failure (gomuks--send-failed send failure t))
-        ((and (stringp (gomuks--alist 'event_id value))
-              (not (string-prefix-p "~" (gomuks--alist 'event_id value))))
+        ((gomuks--send-delivered-p value)
          (gomuks--send-step send 'delivery `((event . ,value))))
         (t (gomuks--set-send-phase send 'failed) (gomuks--send-step send 'retry))))
       (`(,phase . retry)
@@ -169,6 +175,8 @@ This owns mutable workflow state; it is not a pure transformation."
        (when (memq phase '(queued uploading submitting checking))
          (user-error "This send is still pending"))
        (cond
+        ((gomuks--send-delivered-p (gomuks--send-event send))
+         (gomuks--send-step send 'delivery `((event . ,(gomuks--send-event send)))))
         ((eq phase 'uncertain)
          (unless (gomuks--send-event send)
            (user-error "Acceptance is unknown; inspect the room, then restore or discard this send"))

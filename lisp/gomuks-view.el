@@ -111,6 +111,31 @@ non-nil, update only views for that room.  Start no requests."
       (push-button button)
     (user-error "No link or button at point")))
 
+(defun gomuks--request-receipts (id events)
+  "Request missing receipt snapshots for room ID's EVENTS in one batch."
+  (when (process-live-p gomuks--stream)
+    (let ((token (gomuks--cache-token id)) ids)
+      (dolist (event events)
+        (when-let* ((event-id (gomuks--alist 'event_id event)))
+          (unless (or (string-prefix-p "~" event-id)
+                      (gethash (cons id event-id) gomuks--requested-receipts))
+            (puthash (cons id event-id) t gomuks--requested-receipts)
+            (push event-id ids))))
+      (when ids
+        (let ((complete
+               (lambda (failure receipts)
+                 (when (gomuks--cache-current-p id token)
+                   (if failure
+                       (dolist (event-id ids)
+                         (remhash (cons id event-id) gomuks--requested-receipts))
+                     (gomuks--store-receipts id receipts)
+                     (gomuks--update-room-views id))))))
+          (condition-case err
+              (gomuks--post "get_receipts"
+                            `((room_id . ,id) (event_ids . ,(vconcat (nreverse ids))))
+                            complete)
+            (error (funcall complete (error-message-string err) nil))))))))
+
 (defun gomuks--refresh-view (buffer)
   "Procedure: render BUFFER, then explicitly schedule its missing dependencies."
   (when (buffer-live-p buffer)
@@ -119,7 +144,13 @@ non-nil, update only views for that room.  Start no requests."
              (events (if (derived-mode-p 'gomuks-search-mode)
                          (gomuks--render-search)
                        (gomuks--render-buffer buffer id))))
-        (gomuks--request-missing-members id events)
+        (let (readers)
+          (when-let* ((state (gethash id gomuks--receipts)))
+            (maphash (lambda (_key receipt)
+                       (push `((sender . ,(gomuks--alist 'user_id receipt))) readers))
+                     state))
+          (gomuks--request-missing-members id (append events readers)))
+        (gomuks--request-receipts id events)
         (dolist (event events)
           (when-let* ((attachment (gomuks--attachment
                                    (gomuks--effective-content event) event)))
@@ -492,6 +523,11 @@ On failure, use FALLBACK-EVENT if supplied; otherwise fetch TARGET alone."
 								       (gomuks--alist 'has_more response)))
 							'idle 'exhausted)))
                       (setq gomuks--initial-history-requested t)
+                      (gomuks--store-receipts id (gomuks--alist 'receipts response))
+                      (when (assq 'receipts response)
+                        (dolist (event events)
+                          (when-let* ((event-id (gomuks--alist 'event_id event)))
+                            (puthash (cons id event-id) t gomuks--requested-receipts))))
                       (gomuks--update-room-views id)
                       (gomuks--maybe-mark-read)))))))))
     (setq gomuks--history-state 'loading gomuks--initial-history-requested t)

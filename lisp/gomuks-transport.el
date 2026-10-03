@@ -88,7 +88,14 @@
                               (error (setq failure (format "Invalid JSON response: %s"
                                                            parse-error))))
                           (setq failure (format "HTTP %s: %s" code
-                                                (or (plist-get status :error) body)))))
+                                                (if (string-empty-p (string-trim body))
+                                                    (plist-get status :error)
+                                                  (or (ignore-errors
+                                                        (alist-get
+                                                         'error
+                                                         (json-parse-string
+                                                          body :object-type 'alist)))
+                                                      (string-trim body)))))))
                       (gomuks--finish-operation op failure response))))
                 nil t)))
           (when (bufferp buffer)
