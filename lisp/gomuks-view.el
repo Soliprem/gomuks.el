@@ -23,7 +23,7 @@
 (defun gomuks--view-identity ()
   "Return the identity of the current room, search, or reactions view."
   (list gomuks--view-generation major-mode gomuks--room-id gomuks--thread-root gomuks--context-target
-        gomuks--search-generation gomuks--reactions-key
+        gomuks--reactions-key
         (gomuks--alist 'event_id (gomuks--reaction-target))))
 
 (defun gomuks--reaction-target ()
@@ -63,7 +63,6 @@ non-nil, update only views for that room.  Start no requests."
               gomuks--context-events nil
               gomuks--search-results nil gomuks--search-next-batch nil
               gomuks--search-loading nil gomuks--search-error nil
-              gomuks--search-generation (1+ gomuks--search-generation)
               gomuks--reactions-event nil gomuks--reactions-key nil
               header-line-format nil)
         (let ((inhibit-read-only t)) (erase-buffer))))))
@@ -112,36 +111,36 @@ non-nil, update only views for that room.  Start no requests."
       (push-button button)
     (user-error "No link or button at point")))
 
-(defun gomuks--view-events ()
-  "Query current events belonging to this room, thread, context or search."
-  (gomuks--events-for-rows
-   (gomuks--event-rows
-    (cond ((derived-mode-p 'gomuks-search-mode) gomuks--search-results)
-          (gomuks--context-target gomuks--context-events)
-          (gomuks--thread-root gomuks--thread-events)
-          (t (gethash gomuks--room-id gomuks--timelines))))))
-
 (defun gomuks--refresh-view (buffer)
   "Procedure: render BUFFER, then explicitly schedule its missing dependencies."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (let ((id gomuks--room-id)
-            (events (gomuks--view-events)))
-        (if (derived-mode-p 'gomuks-search-mode)
-            (progn (gomuks--render-search) (setq gomuks--view-dirty nil))
-          (gomuks--render-buffer buffer id))
+      (let* ((id gomuks--room-id)
+             (events (if (derived-mode-p 'gomuks-search-mode)
+                         (gomuks--render-search)
+                       (gomuks--render-buffer buffer id))))
         (gomuks--request-missing-members id events)
         (dolist (event events)
           (when-let* ((attachment (gomuks--attachment
                                    (gomuks--effective-content event) event)))
             (gomuks--maybe-preview-image attachment id)))))))
 
-(defun gomuks--render-room (id)
-  "Procedure: invalidate ID's retained views and refresh each visible view once."
+(defun gomuks--update-room-views (id &optional incoming)
+  "Procedure: update ID's retained views and refresh each visible view once.
+INCOMING events extend thread membership, including views currently hidden."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (and (derived-mode-p 'gomuks-room-mode 'gomuks-search-mode)
                  (equal gomuks--room-id id))
+        (when (and incoming (derived-mode-p 'gomuks-room-mode) gomuks--thread-root)
+          (setq gomuks--thread-events
+                (gomuks--merge-thread-rows
+                 gomuks--thread-root gomuks--thread-events
+                 (cl-remove-if-not
+                  (lambda (event)
+                    (and (equal (gomuks--alist 'relates_to event) gomuks--thread-root)
+                         (equal (gomuks--alist 'relation_type event) "m.thread")))
+                  incoming))))
         (setq gomuks--view-dirty t)
         (when (get-buffer-window buffer t) (gomuks--refresh-view buffer))))))
 
@@ -261,7 +260,7 @@ non-nil, update only views for that room.  Start no requests."
            (if muted (remhash id gomuks--muted-rooms)
              (puthash id t gomuks--muted-rooms))
            (gomuks--render-rooms)
-           (gomuks--render-room id)
+           (gomuks--update-room-views id)
            (message "gomuks: %s %s"
                     (if muted "unmuted" "muted") (gomuks--room-name id))))))))
 
@@ -356,18 +355,48 @@ non-nil, update only views for that room.  Start no requests."
       (goto-char position)
       (recenter))))
 
+(defun gomuks--fetch-context (target navigation &optional fallback-event)
+  "Procedure: fetch TARGET's context for this view's NAVIGATION request.
+On failure, use FALLBACK-EVENT if supplied; otherwise fetch TARGET alone."
+  (let* ((id gomuks--room-id) (source (current-buffer))
+         (view (gomuks--view-identity)) (generation (gomuks--cache-token id)))
+    (gomuks--post
+     "get_event_context" `((room_id . ,id) (event_id . ,target) (limit . 12))
+     (lambda (failure response)
+       (when (and (gomuks--cache-current-p id generation)
+                  (gomuks--navigation-current-p source view navigation))
+         (cond
+          ((not failure)
+           (gomuks--store-events (gomuks--alist 'related_events response))
+           (gomuks--show-reply-context
+            id target source
+            (append (reverse (gomuks--alist 'before response))
+                    (list (gomuks--alist 'event response))
+                    (gomuks--alist 'after response))))
+          (fallback-event
+           (gomuks--show-reply-context
+            id target source
+            (list (or (gethash (gomuks--alist 'rowid fallback-event) gomuks--events)
+                      fallback-event))))
+          (t
+           (gomuks--post
+            "get_event" `((room_id . ,id) (event_id . ,target))
+            (lambda (event-failure event)
+              (when (and (gomuks--cache-current-p id generation)
+                         (gomuks--navigation-current-p source view navigation))
+                (if event-failure
+                    (message "gomuks: could not follow reply: %s" event-failure)
+                  (gomuks--show-reply-context id target source (list event)))))))))))))
+
 (defun gomuks-follow-reply (&optional target)
   "Go to the message replied to at point, or to TARGET when supplied."
   (interactive)
   (setq target (or target (gomuks--reply-target (gomuks--event-at-point))))
   (unless target (user-error "This message is not a reply"))
   (let* ((id gomuks--room-id)
-         (source (current-buffer))
-         (view (gomuks--view-identity))
          (navigation (cl-incf gomuks--navigation-serial))
          (room (get-buffer (format "*Gomuks: %s*" id)))
          (current-position (gomuks--event-id-position target))
-         (generation (gomuks--cache-token id))
          (room-position (and room
                              (with-current-buffer room
                                (gomuks--event-id-position target)))))
@@ -379,27 +408,7 @@ non-nil, update only views for that room.  Start no requests."
       (gomuks--show-room room)
       (goto-char room-position)
       (recenter))
-     (t
-      (gomuks--post
-       "get_event_context" `((room_id . ,id) (event_id . ,target) (limit . 12))
-       (lambda (failure response)
-         (when (and (gomuks--cache-current-p id generation)
-                    (gomuks--navigation-current-p source view navigation))
-           (if failure
-               (gomuks--post
-                "get_event" `((room_id . ,id) (event_id . ,target))
-                (lambda (event-failure event)
-                  (when (and (gomuks--cache-current-p id generation)
-                             (gomuks--navigation-current-p source view navigation))
-                    (if event-failure
-                        (message "gomuks: could not follow reply: %s" event-failure)
-                      (gomuks--show-reply-context id target source (list event))))))
-             (gomuks--store-events (gomuks--alist 'related_events response))
-             (gomuks--show-reply-context
-              id target source
-              (append (reverse (gomuks--alist 'before response))
-                      (list (gomuks--alist 'event response))
-                      (gomuks--alist 'after response)))))))))))
+     (t (gomuks--fetch-context target navigation)))))
 
 (defun gomuks-redact ()
   "Redact the message at point after confirmation."
@@ -483,7 +492,7 @@ non-nil, update only views for that room.  Start no requests."
 								       (gomuks--alist 'has_more response)))
 							'idle 'exhausted)))
                       (setq gomuks--initial-history-requested t)
-                      (gomuks--render-room id)
+                      (gomuks--update-room-views id)
                       (gomuks--maybe-mark-read)))))))))
     (setq gomuks--history-state 'loading gomuks--initial-history-requested t)
     (condition-case err (gomuks--post command data complete)

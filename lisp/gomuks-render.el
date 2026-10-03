@@ -109,14 +109,6 @@
                        (next-single-property-change (point-min) 'gomuks-room-id)
                        (point-min)))))))
 
-(defun gomuks--visible-body (event body)
-  "Return BODY without Matrix's quoted reply fallback for EVENT."
-  (if (and (stringp body) (gomuks--reply-target event)
-           (string-prefix-p "> " body)
-           (string-match "\n\n" body))
-      (substring body (match-end 0))
-    body))
-
 (defun gomuks--formatted-body (content event)
   "Render CONTENT's Matrix HTML, or return nil if it cannot be rendered.
 Remove the quoted reply fallback for EVENT before rendering."
@@ -324,16 +316,15 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                            (gomuks--alist 'rowid event))
         t))))
 
-(defun gomuks--room-header (id)
-  "Return the fixed header for room ID in the current room buffer."
+(defun gomuks--room-header (id kind)
+  "Query the fixed header for room ID and view KIND."
   (let* ((name (replace-regexp-in-string "[\n\r]+" " " (gomuks--room-name id)))
          (topic (gomuks--alist 'topic (gethash id gomuks--rooms)))
-         (kind (cond (gomuks--context-target "REPLY CONTEXT")
-                     (gomuks--thread-root "THREAD"))))
+         (label (pcase kind ('context "REPLY CONTEXT") ('thread "THREAD"))))
     (concat " " (propertize name 'face 'gomuks-room-face)
             (when (gethash id gomuks--muted-rooms)
               (propertize "  [muted]" 'face 'shadow))
-            (when kind (concat "  ·  " (propertize kind 'face 'gomuks-heading-face)))
+            (when label (concat "  ·  " (propertize label 'face 'gomuks-heading-face)))
             (when (and (stringp topic) (not (string-empty-p topic)))
               (concat "  ·  "
                       (propertize
@@ -344,35 +335,41 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                        'face 'shadow))))))
 
 (defun gomuks--render-buffer (buffer id)
-  "Redraw room, thread, or reply context BUFFER for room ID."
-  ;; ponytail: visible redraw stays O(n); bound or incrementally update history
+  "Write room ID's BUFFER and return its current events for dependency scheduling."
+  ;; visible redraw stays O(n); bound or incrementally update history
   ;; when measured latency requires it. Hidden views defer this work.
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (let ((inhibit-read-only t)
-            (at-end (= (point) (point-max)))
-            (rowid (get-text-property (point) 'gomuks-event-rowid))
-            (windows (mapcar (lambda (window)
-                               (list window
-                                     (or (= (window-point window) (point-max))
-                                         (pos-visible-in-window-p
-                                          (max (point-min) (1- (point-max)))
-                                          window))
-                                     (window-start window)
-                                     (get-text-property (window-start window)
-                                                        'gomuks-event-rowid)))
-                             (get-buffer-window-list buffer nil t)))
-            (shown-events nil)
-            (thread-counts (unless (or gomuks--thread-root gomuks--context-target)
-                             (gomuks--thread-counts id)))
-            (previous nil))
-        (setq-local header-line-format (gomuks--room-header id))
+      (let* ((inhibit-read-only t)
+             (kind (cond (gomuks--context-target 'context)
+                         (gomuks--thread-root 'thread) (t 'room)))
+             (events (gomuks--events-for-rows
+                      (gomuks--event-rows
+                       (pcase kind
+                         ('context gomuks--context-events)
+                         ('thread gomuks--thread-events)
+                         ('room (gethash id gomuks--timelines))))))
+             (at-end (= (point) (point-max)))
+             (rowid (get-text-property (point) 'gomuks-event-rowid))
+             (windows (mapcar (lambda (window)
+                                (list window
+                                      (or (= (window-point window) (point-max))
+                                          (pos-visible-in-window-p
+                                           (max (point-min) (1- (point-max)))
+                                           window))
+                                      (window-start window)
+                                      (get-text-property (window-start window)
+                                                         'gomuks-event-rowid)))
+                              (get-buffer-window-list buffer nil t)))
+             (thread-counts (when (eq kind 'room) (gomuks--thread-counts id)))
+             (previous nil))
+        (setq-local header-line-format (gomuks--room-header id kind))
         (erase-buffer)
         (insert (propertize (if (bound-and-true-p evil-mode)
                                 "i" "C-c C-s")
                             'face 'help-key-binding)
                 " compose   "
-                (if gomuks--context-target ""
+                (if (eq kind 'context) ""
                   (concat (propertize (if (bound-and-true-p evil-mode) "p" "M-p")
                                       'face 'help-key-binding) " older   "))
                 (propertize "C-k" 'face 'help-key-binding)
@@ -380,23 +377,9 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                 " home   " (propertize "o" 'face 'help-key-binding)
                 " open   " (propertize "D" 'face 'help-key-binding)
                 " save\n\n")
-        (cond
-         (gomuks--context-target
-          (dolist (event (gomuks--events-for-rows (gomuks--event-rows gomuks--context-events)))
-            (push event shown-events)
-            (when (gomuks--insert-event event previous)
-              (setq previous event))))
-         (gomuks--thread-root
-          (dolist (event (gomuks--events-for-rows (gomuks--event-rows gomuks--thread-events)))
-            (push event shown-events)
-            (when (gomuks--insert-event event previous)
-              (setq previous event))))
-         (t
-          (dolist (rowid (gethash id gomuks--timelines))
-            (when-let* ((event (gethash rowid gomuks--events)))
-              (push event shown-events)
-              (when (gomuks--insert-event event previous thread-counts)
-                (setq previous event))))))
+        (dolist (event events)
+          (when (gomuks--insert-event event previous thread-counts)
+            (setq previous event)))
         (cond
          (at-end (goto-char (point-max)))
          (rowid
@@ -422,7 +405,7 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                      (min start (point-max)))
                  t)))))
         (setq gomuks--view-dirty nil)
-        (nreverse shown-events)))))
+        events))))
 
 (defun gomuks--event-id-position (event-id)
   "Find the displayed position of EVENT-ID in the current buffer."
@@ -438,15 +421,16 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
     found))
 
 (defun gomuks--render-search ()
-  "Redraw the current search buffer from its result events."
+  "Write this search buffer and return the events used for its dependencies."
   (let ((inhibit-read-only t)
+        (events (gomuks--events-for-rows (gomuks--event-rows gomuks--search-results)))
         (selected (get-text-property (point) 'gomuks-event-id)))
     (erase-buffer)
     (insert (propertize (format "SEARCH  %s\n" (gomuks--room-name gomuks--room-id))
                         'face 'gomuks-title-face)
             (format "%s  ·  RET open  ·  n more  ·  q back\n\n"
                     gomuks--search-query))
-    (dolist (event (gomuks--events-for-rows (gomuks--event-rows gomuks--search-results)))
+    (dolist (event events)
       (let* ((start (point))
              (timestamp (gomuks--alist 'timestamp event))
              (body (gomuks--visible-body
@@ -476,7 +460,9 @@ THREAD-COUNTS maps thread root IDs to known reply counts."
                         (text-property-any (point-min) (point-max)
                                            'gomuks-event-id selected))
                    (next-single-property-change (point-min) 'gomuks-event-id)
-                   (point-min)))))
+                   (point-min)))
+    (setq gomuks--view-dirty nil)
+    events))
 
 (provide 'gomuks-render)
 ;;; gomuks-render.el ends here

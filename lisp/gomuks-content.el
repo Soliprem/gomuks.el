@@ -43,6 +43,12 @@
           (when-let* ((mentions (gomuks--draft-mentions text)))
             `((mentions . ,mentions)))))
 
+(defun gomuks--visible-body (event body)
+  "Transform BODY by removing Matrix's quoted reply fallback for EVENT."
+  (if (and (stringp body) (gomuks--reply-target event)
+           (string-prefix-p "> " body) (string-match "\n\n" body))
+      (substring body (match-end 0)) body))
+
 (defun gomuks--edit-source (event)
   "Query the latest saved Markdown for EVENT, falling back to its visible body."
   (let* ((current (or (gethash (gomuks--alist 'rowid event) gomuks--events) event))
@@ -50,10 +56,7 @@
          (source (gomuks--alist 'edit_source
                                 (gomuks--alist 'local_content (or edit current))))
          (body (gomuks--alist 'body (gomuks--effective-content current))))
-    (or source
-        (if (and (gomuks--reply-target current) (stringp body)
-                 (string-prefix-p "> " body) (string-match "\n\n" body))
-            (substring body (match-end 0)) body))))
+    (or source (gomuks--visible-body current body))))
 
 (provide 'gomuks-content)
 ;;; gomuks-content.el ends here

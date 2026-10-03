@@ -354,8 +354,6 @@ Preserve cached events, room metadata, and member indexes."
   "Non-nil while a search request is pending.")
 (defvar-local gomuks--search-error nil
   "Most recent backend search error in this buffer.")
-(defvar-local gomuks--search-generation 0
-  "Serial number used to ignore stale search responses.")
 
 (defun gomuks--alist (key object)
   "Return the value of KEY in alist OBJECT, comparing keys with `equal'."

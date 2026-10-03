@@ -69,7 +69,7 @@
               gomuks--search-next-batch nil
               gomuks--search-loading nil
               gomuks--search-error nil
-              gomuks--search-generation (1+ gomuks--search-generation))
+              gomuks--view-generation (cl-incf gomuks--view-serial))
         (gomuks--render-search))
       (delete-other-windows)
       (switch-to-buffer buffer)
@@ -84,26 +84,10 @@
   "Open the search result at point with nearby messages."
   (interactive)
   (let* ((event (gomuks--event-at-point))
-         (id gomuks--room-id)
          (target (gomuks--alist 'event_id event))
-         (generation (gomuks--cache-token id))
-         (view (gomuks--view-identity))
-         (navigation (cl-incf gomuks--navigation-serial))
-         (source (current-buffer)))
+         (navigation (cl-incf gomuks--navigation-serial)))
     (unless target (user-error "This search result has no event ID"))
-    (gomuks--post
-     "get_event_context" `((room_id . ,id) (event_id . ,target) (limit . 12))
-     (lambda (failure response)
-       (when (and (gomuks--cache-current-p id generation)
-                  (gomuks--navigation-current-p source view navigation))
-         (if failure
-             (gomuks--show-reply-context id target source (list (or (gethash (gomuks--alist 'rowid event) gomuks--events) event)))
-           (gomuks--store-events (gomuks--alist 'related_events response))
-           (gomuks--show-reply-context
-            id target source
-            (append (reverse (gomuks--alist 'before response))
-                    (list (gomuks--alist 'event response))
-                    (gomuks--alist 'after response)))))))))
+    (gomuks--fetch-context target navigation event)))
 
 (defun gomuks-search-back ()
   "Return from search results to the room that opened them."
