@@ -11,7 +11,7 @@
 ;;; Code:
 
 (require 'gomuks-backend)
-(declare-function gomuks--render-room "gomuks-view" (id))
+(declare-function gomuks--update-room-views "gomuks-view" (id &optional incoming))
 
 (defun gomuks--request-missing-members (id events)
   "Procedure: coalesce missing sender profiles needed by EVENTS in room ID."
@@ -33,7 +33,7 @@
                        (dolist (key keys)
                          (remhash (cons id (gomuks--alist 'state_key key)) gomuks--requested-members))
                      (gomuks--store-members id response t)
-                     (gomuks--render-room id))))))
+                     (gomuks--update-room-views id))))))
           (condition-case err
               (gomuks--post "get_specific_room_state" `((keys . ,(vconcat (reverse keys)))) complete)
             (error (funcall complete (error-message-string err) nil))))))))

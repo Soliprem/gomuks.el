@@ -29,12 +29,7 @@
   (interactive)
   (unless (derived-mode-p 'gomuks-compose-mode) (user-error "Not in a Gomuks composer"))
   (when gomuks--compose-sending (user-error "This draft is already being sent"))
-  (when gomuks--compose-job
-    (if (or (gomuks--send-event gomuks--compose-job)
-            (eq (gomuks--send-phase gomuks--compose-job) 'uncertain))
-        (user-error "Use C-c C-y to recover the previous send before submitting again")
-      (remhash (gomuks--send-id gomuks--compose-job) gomuks--sends)
-      (setq gomuks--compose-job nil)))
+  (gomuks--prepare-draft-change)
   (let ((text (string-trim-right (buffer-substring-no-properties (point-min) (point-max))))
         (attachments (gomuks--pending-attachments))
         (relation (or gomuks--compose-relation
@@ -149,12 +144,12 @@
     (setq gomuks--compose-attachment nil)
     (gomuks--delete-temp-attachments (cl-set-difference staged owned :test #'eq))))
 
-(defun gomuks--prepare-attachment-change ()
-  "Return unaccepted failed snapshots to this draft before changing its files."
+(defun gomuks--prepare-draft-change ()
+  "Procedure: return an unaccepted failed snapshot to this draft for reuse."
   (when gomuks--compose-job
     (if (or (gomuks--send-event gomuks--compose-job)
             (eq (gomuks--send-phase gomuks--compose-job) 'uncertain))
-        (user-error "Recover or discard the accepted send before changing its attachments")
+        (user-error "Use C-c C-y to recover the previous send before changing or submitting its draft")
       (remhash (gomuks--send-id gomuks--compose-job) gomuks--sends)
       (setq gomuks--compose-job nil))))
 
@@ -165,7 +160,7 @@ LABEL is shown in the composer header."
     (user-error "Focus a Gomuks draft first"))
   (when gomuks--compose-sending
     (user-error "This draft is already being sent"))
-  (gomuks--prepare-attachment-change)
+  (gomuks--prepare-draft-change)
   (unless (file-regular-p file)
     (user-error "Attachment file does not exist"))
   (gomuks--pending-attachments)
@@ -206,7 +201,7 @@ LABEL is shown in the composer header."
     (user-error "Focus a Gomuks draft first"))
   (when gomuks--compose-sending
     (user-error "This draft is already being sent"))
-  (gomuks--prepare-attachment-change)
+  (gomuks--prepare-draft-change)
   (setq attachment (or attachment
                        (gomuks--choose-attachment "Remove attachment: ")))
   (unless (memq attachment (gomuks--pending-attachments))
@@ -329,7 +324,7 @@ and INITIAL-TEXT seeds a newly created draft."
                                  :relation relation :content base-content
                                  :token (gomuks--cache-token gomuks--room-id))))
     (puthash (gomuks--send-id send) send gomuks--sends)
-    (gomuks--send-submit send)))
+    (gomuks--send-step send 'submit)))
 
 (defun gomuks-reply (&optional text)
   "Compose a reply to the message at point, or send TEXT directly."

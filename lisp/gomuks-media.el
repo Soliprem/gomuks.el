@@ -12,7 +12,7 @@
 
 (require 'gomuks-backend)
 (require 'gomuks-content)
-(declare-function gomuks--render-room "gomuks-view" (id))
+(declare-function gomuks--update-room-views "gomuks-view" (id &optional incoming))
 (declare-function gomuks--event-at-point "gomuks-render")
 (declare-function empv-play "empv" (uri))
 (declare-function empv-toggle "empv" ())
@@ -40,44 +40,32 @@
                       "m.sticker"
                     (gomuks--alist 'msgtype content))))))
 
-(defun gomuks-audio-toggle ()
-  "Pause or resume audio playing through the configured backend."
-  (interactive)
+(defun gomuks--audio-control (&optional seconds)
+  "Procedure: toggle playback, or seek SECONDS, through the selected backend."
   (pcase gomuks-audio-backend
     ('emms
      (unless (require 'emms nil t)
        (user-error "EMMS is required for audio controls"))
-     (emms-pause))
+     (if seconds (emms-seek seconds) (emms-pause)))
     ('empv
      (if (require 'empv nil t)
-         (empv-toggle)
+         (if seconds (empv-seek (number-to-string seconds)) (empv-toggle))
        (user-error "EMPV is required for audio controls")))))
+
+(defun gomuks-audio-toggle ()
+  "Pause or resume audio playing through the configured backend."
+  (interactive)
+  (gomuks--audio-control))
 
 (defun gomuks-audio-backward ()
   "Seek five seconds backward in audio playing through the configured backend."
   (interactive)
-  (pcase gomuks-audio-backend
-    ('emms
-     (unless (require 'emms nil t)
-       (user-error "EMMS is required for audio controls"))
-     (emms-seek -5))
-    ('empv
-     (if (require 'empv nil t)
-         (empv-seek "-5")
-       (user-error "EMPV is required for audio controls")))))
+  (gomuks--audio-control -5))
 
 (defun gomuks-audio-forward ()
   "Seek five seconds forward in audio playing through the configured backend."
   (interactive)
-  (pcase gomuks-audio-backend
-    ('emms
-     (unless (require 'emms nil t)
-       (user-error "EMMS is required for audio controls"))
-     (emms-seek 5))
-    ('empv
-     (if (require 'empv nil t)
-         (empv-seek "5")
-       (user-error "EMPV is required for audio controls")))))
+  (gomuks--audio-control 5))
 
 (defun gomuks--media-url (attachment)
   "Return the backend download URL for ATTACHMENT."
@@ -276,7 +264,7 @@ Coalesce consumers with the same transfer policy; isolate consumer failures."
            (cl-decf gomuks--preview-active)
            (unwind-protect
                (when (and path (gomuks--cache-current-p id token))
-                 (gomuks--render-room id))
+                 (gomuks--update-room-views id))
              (gomuks--drain-previews)))
          gomuks-inline-image-max-bytes)))))
 

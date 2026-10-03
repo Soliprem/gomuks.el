@@ -13,7 +13,7 @@
 (require 'gomuks-core)
 (require 'gomuks-transport)
 (declare-function gomuks--render-rooms "gomuks-render")
-(declare-function gomuks--render-room "gomuks-view" (id))
+(declare-function gomuks--update-room-views "gomuks-view" (id &optional incoming))
 (declare-function gomuks--render-buffer "gomuks-render" (buffer id))
 (declare-function gomuks--maybe-mark-read "gomuks-view")
 (declare-function gomuks--notify "gomuks-view" (id event))
@@ -134,7 +134,7 @@
        (gomuks--render-rooms))
       ("events_decrypted"
        (gomuks--store-decryption data)
-       (gomuks--render-room (gomuks--alist 'room_id data))
+       (gomuks--update-room-views (gomuks--alist 'room_id data))
        (gomuks--render-rooms))
       ("send_complete" (gomuks--complete-send data))
       ("client_state"
@@ -158,21 +158,8 @@
     (if (gomuks--alist 'clear_state sync) (gomuks--reset-views)
       (dolist (id reset) (gomuks--reset-views id))))
   (dolist (entry (gomuks--alist 'rooms sync))
-    (let ((id (gomuks--key-string (car entry)))
-          (incoming (gomuks--alist 'events (cdr entry))))
-      (dolist (buffer (buffer-list))
-        (with-current-buffer buffer
-          (when (and (derived-mode-p 'gomuks-room-mode) gomuks--thread-root
-                     (equal gomuks--room-id id))
-            (setq gomuks--thread-events
-                  (gomuks--merge-thread-rows
-                   gomuks--thread-root gomuks--thread-events
-                   (cl-remove-if-not
-                    (lambda (event)
-                      (and (equal (gomuks--alist 'relates_to event) gomuks--thread-root)
-                           (equal (gomuks--alist 'relation_type event) "m.thread")))
-                    incoming))))))
-      (gomuks--render-room id)))
+    (gomuks--update-room-views (gomuks--key-string (car entry))
+                               (gomuks--alist 'events (cdr entry))))
   (gomuks--render-rooms)
   (gomuks--maybe-mark-read)
   (dolist (entry (gomuks--alist 'rooms sync))
