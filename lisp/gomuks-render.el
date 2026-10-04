@@ -15,6 +15,22 @@
 (declare-function gomuks-follow-reply "gomuks-view" (&optional target))
 (declare-function gomuks-open-thread "gomuks-view" (&optional event))
 (declare-function gomuks-show-reactions "gomuks-reactions" (event key))
+(declare-function gomuks--reaction-help "gomuks-reactions" (event key count))
+
+(defun gomuks--person-info (id user timestamp)
+  "Describe USER in room ID, including a local TIMESTAMP when available."
+  (let ((name (replace-regexp-in-string
+               "[\n\r]+" " " (gomuks--sender-name id `((sender . ,user))))))
+    (concat name (unless (equal name user) (format " (%s)" user))
+            (when (numberp timestamp)
+              (concat " · " (format-time-string
+                              "%Y-%m-%d %H:%M:%S %Z"
+                              (seconds-to-time (/ timestamp 1000.0))))))))
+
+(defun gomuks--hover-text (text target)
+  "Mark TEXT as popup details for hover TARGET."
+  (propertize text 'gomuks-hover-target target 'gomuks-hover-buffer (current-buffer)
+              'help-echo-inhibit-substitution t))
 
 (defun gomuks--room-preview (event topic)
   "Describe the latest EVENT in a room, falling back to TOPIC."
@@ -231,7 +247,7 @@ Remove the quoted reply fallback for EVENT before rendering."
     (format-time-string "%Y-%m-%d" (seconds-to-time (/ timestamp 1000.0)))))
 
 (defun gomuks--readers-for-events (id events)
-  "Map displayed event IDs to readers in room ID's EVENTS.
+  "Map displayed event IDs to public receipt records in room ID's EVENTS.
 Receipts on hidden events attach to the preceding visible message."
   (let ((positions (make-hash-table :test 'equal))
         (readers (make-hash-table :test 'equal)) previous)
@@ -255,14 +271,14 @@ Receipts on hidden events attach to the preceding visible message."
            (when (and position (not (equal user gomuks--user-id))
                       (or (null thread) (equal thread "")
                           (equal thread (or gomuks--thread-root "main"))))
-             (cl-pushnew user (gethash position readers) :test #'equal))))
+             (cl-pushnew receipt (gethash position readers) :test #'equal))))
        state))
     readers))
 
 (defun gomuks--insert-event (event &optional previous thread-counts readers)
   "Insert EVENT, grouping it after PREVIOUS when appropriate.
 THREAD-COUNTS maps thread root IDs to known reply counts.
-READERS maps displayed event IDs to the users who read up to them."
+READERS maps displayed event IDs to the public receipts at those positions."
   (let* ((content (gomuks--effective-content event))
          (attachment (unless (gomuks--alist 'redacted_by event)
                        (gomuks--attachment content event)))
@@ -324,6 +340,7 @@ READERS maps displayed event IDs to the users who read up to them."
           (let ((body-start (point)))
             (insert (replace-regexp-in-string "\n" "\n        " body))
             (gomuks--buttonize-urls body-start (point))
+            (put-text-property body-start (point) 'wrap-prefix "        ")
             (insert "\n")))
         (unless (or body attachment)
           (insert (if (gomuks--alist 'decryption_error event)
@@ -337,11 +354,13 @@ READERS maps displayed event IDs to the users who read up to them."
         (when reactions
           (insert "        ")
           (dolist (entry reactions)
-            (let ((key (gomuks--key-string (car entry))))
+            (let ((key (gomuks--key-string (car entry))) (count (cdr entry)))
               (insert-text-button
                (format "%s %s" key (cdr entry))
                'face 'link 'follow-link t
-               'help-echo "Show who used this reaction"
+               'help-echo (lambda (window _object _position)
+                            (with-current-buffer (window-buffer window)
+                              (gomuks--reaction-help event key count)))
                'action (lambda (_button) (gomuks-show-reactions event key)))
               (insert "  ")))
           (insert "\n"))
@@ -359,16 +378,32 @@ READERS maps displayed event IDs to the users who read up to them."
                'face 'link 'follow-link t
                'action (lambda (_button) (gomuks-open-thread event)))
               (insert "\n"))))
-        (when-let* ((users (and readers (gethash (gomuks--alist 'event_id event) readers))))
-          (insert "        "
-                  (propertize
-                   (concat "Read by "
-                           (mapconcat (lambda (user)
-                                        (gomuks--sender-name gomuks--room-id
-                                                             `((sender . ,user))))
-                                      (sort (copy-sequence users) #'string-lessp) ", "))
-                   'face 'shadow 'help-echo (string-join users ", "))
-                  "\n"))
+        (when-let* ((receipts (and readers (gethash (gomuks--alist 'event_id event) readers))))
+          (let* ((users (sort (delete-dups (mapcar (lambda (receipt) (gomuks--alist 'user_id receipt))
+                                                 receipts)) #'string-lessp))
+                 (details (sort (copy-sequence receipts)
+                                (lambda (a b) (string-lessp (gomuks--alist 'user_id a)
+                                                           (gomuks--alist 'user_id b))))))
+            (insert "        "
+                    (propertize
+                     (concat "Read by "
+                             (mapconcat (lambda (user)
+                                          (gomuks--sender-name gomuks--room-id `((sender . ,user))))
+                                        users ", "))
+                     'face 'shadow 'mouse-face 'highlight 'wrap-prefix "        "
+                     'help-echo
+                     (gomuks--hover-text
+                      (concat "Read receipts\n"
+                              (mapconcat
+                               (lambda (receipt)
+                                 (concat (gomuks--person-info gomuks--room-id
+                                                             (gomuks--alist 'user_id receipt)
+                                                             (gomuks--alist 'timestamp receipt))
+                                         (when-let* ((thread (gomuks--alist 'thread_id receipt)))
+                                           (if (equal thread "main") " · main timeline" " · thread"))))
+                               details "\n"))
+                      (list 'receipt (gomuks--alist 'event_id event))))
+                    "\n")))
         (unless (bolp) (insert "\n"))
         (put-text-property start (point) 'gomuks-event event)
         (put-text-property start (point) 'gomuks-event-rowid

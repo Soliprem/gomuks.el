@@ -15,6 +15,68 @@
 (declare-function emoji--init "emoji" ())
 (declare-function emoji--read-emoji "emoji" ())
 
+(defun gomuks--reaction-help-text (id event key count entry)
+  "Describe EVENT's KEY reactions in room ID from cached ENTRY and COUNT."
+  (gomuks--hover-text
+   (concat
+    (format "%s — %d reaction%s\n" key count (if (= count 1) "" "s"))
+    (cond
+     ((plist-get entry :pending) "Loading people who reacted…")
+     ((plist-get entry :failure) (concat "Could not load reactions: " (plist-get entry :failure)))
+     (t
+      (let ((seen (make-hash-table :test 'equal)) people)
+        (dolist (reaction (plist-get entry :events))
+          (let ((user (gomuks--alist 'sender reaction)))
+            (when (and (stringp user) (not (gethash user seen))
+                       (not (gomuks--alist 'redacted_by reaction))
+                       (equal key (gomuks--alist 'key (gomuks--alist 'm.relates_to
+                                                                   (gomuks--event-content reaction)))))
+              (puthash user t seen)
+              (push (gomuks--person-info id user (gomuks--alist 'timestamp reaction)) people))))
+        (if people (string-join (sort people #'string-lessp) "\n") "No reactions found."))))
+    "\nRET shows the reaction list; d there removes yours.")
+   (list 'reaction (gomuks--alist 'event_id event) key)))
+
+(defun gomuks--reaction-help (event key count)
+  "Describe EVENT's KEY reactions, requesting people only on hover.
+Coalesce requests for all reaction keys on a message in this view."
+  (let* ((id gomuks--room-id) (event-id (gomuks--alist 'event_id event))
+         (token (gomuks--cache-token id))
+         (buffer (current-buffer)) (view (gomuks--view-identity))
+         (counts (gomuks--alist 'reactions event))
+         (entry (and gomuks--hover-reactions (gethash event-id gomuks--hover-reactions))))
+    (unless (and entry (eq event (plist-get entry :event))
+                 (equal token (plist-get entry :token)) (equal counts (plist-get entry :counts)))
+      (unless gomuks--hover-reactions (setq gomuks--hover-reactions (make-hash-table :test 'equal)))
+      (setq entry (list :event event :token token :counts (copy-tree counts)
+                        :pending t :failure nil :events nil))
+      (puthash event-id entry gomuks--hover-reactions)
+      (let ((complete
+             (lambda (failure response)
+               (when (and (gomuks--cache-current-p id token) (gomuks--view-current-p buffer view))
+                 (with-current-buffer buffer
+                   (when (eq entry (gethash event-id gomuks--hover-reactions))
+                     (setf (plist-get entry :pending) nil
+                           (plist-get entry :failure) failure
+                           (plist-get entry :events) response)
+                     (unless failure
+                       (gomuks--store-events response)
+                       (gomuks--request-missing-members id response))
+                     (when (and (eq (car gomuks--hover-target) 'reaction)
+                                (equal (cadr gomuks--hover-target) event-id))
+                       (let* ((hover-key (nth 2 gomuks--hover-target))
+                              (hover-count (or (cdr (assoc-string hover-key counts)) count)))
+                         (gomuks--show-hover-help
+                          (gomuks--reaction-help-text id event hover-key hover-count entry))))))))))
+        (condition-case err
+            (if event-id
+                (gomuks--post "get_related_events"
+                              `((room_id . ,id) (event_id . ,event-id) (relation_type . "m.annotation"))
+                              complete)
+              (funcall complete "This message has no event ID yet" nil))
+          (error (funcall complete (error-message-string err) nil)))))
+    (gomuks--reaction-help-text id event key count entry)))
+
 (defun gomuks--read-reaction ()
   "Read an emoji reaction by name, or raw text with a prefix argument."
   (if (and (not current-prefix-arg)

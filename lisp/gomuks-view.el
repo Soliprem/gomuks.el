@@ -12,6 +12,7 @@
 
 (require 'gomuks-compose)
 (require 'gomuks-render)
+(require 'tooltip)
 (declare-function gomuks-rooms-mode "gomuks-ui")
 (declare-function gomuks-room-mode "gomuks-ui")
 (declare-function gomuks-search-mode "gomuks-ui")
@@ -19,6 +20,45 @@
 (declare-function notifications-notify "notifications")
 (declare-function emoji--init "emoji")
 (declare-function emoji--read-emoji "emoji")
+
+(defvar-local gomuks--hover-target nil "Details currently displayed in a hover popup.")
+(defvar-local gomuks--hover-message nil "Text currently displayed in this view's popup.")
+(defvar-local gomuks--hover-reactions nil "Reaction detail requests and results for this view.")
+(defvar gomuks--hover-buffer nil "Buffer owning the active Gomuks hover popup.")
+
+(defun gomuks--hide-hover ()
+  "Dismiss the active Gomuks detail popup, even when another buffer has focus."
+  (when gomuks--hover-buffer
+    (when (buffer-live-p gomuks--hover-buffer)
+      (with-current-buffer gomuks--hover-buffer
+        (setq gomuks--hover-target nil gomuks--hover-message nil)))
+    (setq gomuks--hover-buffer nil)
+    (tooltip-hide)))
+
+(defun gomuks--show-hover-help (text)
+  "Display marked TEXT in a native popup for this view."
+  (if-let* ((target (and (stringp text) (> (length text) 0)
+                         (get-text-property 0 'gomuks-hover-target text))))
+      (progn
+        (unless (eq gomuks--hover-buffer (current-buffer)) (gomuks--hide-hover))
+        (setq gomuks--hover-buffer (current-buffer))
+        (setq gomuks--hover-target target)
+        (unless (equal text gomuks--hover-message)
+          (setq gomuks--hover-message text)
+          (tooltip-show (copy-sequence text))))
+    (gomuks--hide-hover)))
+
+(defun gomuks--dispatch-hover-help (display text)
+  "Show Gomuks details from the hovered buffer; use DISPLAY for other TEXT."
+  (if-let* ((buffer (and (stringp text) (> (length text) 0)
+                         (get-text-property 0 'gomuks-hover-buffer text)))
+            ((buffer-live-p buffer)))
+      (with-current-buffer buffer (gomuks--show-hover-help text))
+    (gomuks--hide-hover)
+    (when display (funcall display text))))
+
+(add-function :around (default-value 'show-help-function) #'gomuks--dispatch-hover-help)
+(add-hook 'pre-command-hook #'gomuks--hide-hover)
 
 (defun gomuks--view-identity ()
   "Return the identity of the current room, search, or reactions view."
@@ -64,7 +104,9 @@ non-nil, update only views for that room.  Start no requests."
               gomuks--search-results nil gomuks--search-next-batch nil
               gomuks--search-loading nil gomuks--search-error nil
               gomuks--reactions-event nil gomuks--reactions-key nil
+              gomuks--hover-reactions nil
               header-line-format nil)
+        (when (eq gomuks--hover-buffer buffer) (gomuks--hide-hover))
         (let ((inhibit-read-only t)) (erase-buffer))))))
 
 

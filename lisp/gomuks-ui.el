@@ -147,6 +147,7 @@
   (setq gomuks--view-generation (cl-incf gomuks--view-serial)))
 (define-derived-mode gomuks-room-mode special-mode "Gomuks room"
   "Mode for a gomuks room timeline."
+  (visual-line-mode 1)
   (setq gomuks--view-generation (cl-incf gomuks--view-serial))
   (add-hook 'post-command-hook #'gomuks--maybe-mark-read nil t)
   (add-hook 'post-command-hook #'gomuks--refresh-visible-views nil t))
@@ -161,9 +162,11 @@
   (visual-line-mode 1))
 (define-derived-mode gomuks-search-mode special-mode "Gomuks search"
   "Mode for paginated Gomuks message search results."
+  (visual-line-mode 1)
   (setq gomuks--view-generation (cl-incf gomuks--view-serial)))
 (define-derived-mode gomuks-reactions-mode special-mode "Gomuks reactions"
   "Mode for showing the people who used a reaction."
+  (visual-line-mode 1)
   (setq gomuks--view-generation (cl-incf gomuks--view-serial)))
 (define-derived-mode gomuks-attachment-preview-mode special-mode "Gomuks attachment"
   "Mode for previewing an attachment staged in a draft.")
