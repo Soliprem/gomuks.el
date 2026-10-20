@@ -41,21 +41,17 @@ machine localhost port 29325 login YOUR_USER password YOUR_PASSWORD
 ```
 
 `gomuks.el` looks up the host and port in `gomuks-backend-url`. If it finds no
-entry, it asks as before and keeps the password only for this Emacs session.
+entry, it prompts and keeps the password only for this Emacs session.
 `M-x gomuks-change-credentials` prompts for an override in the current session;
 update the stored entry too if the credentials really changed. Run
-`M-x gomuks-disconnect` to close the event stream and forget the in-memory
-password.
+`M-x gomuks-disconnect` to disconnect and forget the backend password.
 
 ## Chatting
 
-Each room has a multiline draft that survives navigation and failed sends.
-Replies and edits have separate drafts; thread drafts send into the thread.
-Files and clipboard images queue in the composer. They send as separate messages
-in order, with the draft text on the last attachment. If one fails, the unsent
-files and draft text stay put. Messages use room display names; hover over a
-sender for the full Matrix ID. Links in messages are clickable. Formatted Matrix
-messages display emphasis, links, and code in the timeline.
+Drafts are kept only for the current Emacs session. Retry failed sends with
+`C-c C-y`, or use `M-x gomuks-restore-send` to recover one in a separate draft.
+Files and clipboard images send as separate messages, with the draft text on
+the last attachment. Hover over a sender for their full Matrix ID.
 
 Search covers history Gomuks has fetched. Small images preview inline in
 graphical Emacs. Audio playback uses EMPV by default; set `gomuks-audio-backend`
@@ -86,9 +82,9 @@ web page.
 | Room                            | `C-c C-j`           | Follow reply at point                                       |
 | Room                            | `C-c C-f`           | Search this room                                            |
 | Room                            | `C-c C-a`           | Upload a file                                               |
-| Room or composer                | `C-c C-p`           | Send a local image as a sticker                             |
 | Room or composer                | `C-c C-g`           | GIF/WebP file or direct HTTPS image URL (stage in composer) |
-| Room or composer                | `C-c C-y`           | Retry a retained failed send                                |
+| Room or composer                | `C-c C-i`           | Toggle image and sticker previews for this session          |
+| Room or composer                | `C-c C-y`           | Retry a failed send                                         |
 | Room                            | `o` / `C-c C-o`     | Open attachment at point                                    |
 | Room                            | `C-c C-SPC`         | Pause or resume audio                                       |
 | Room                            | `C-c <` / `C-c >`   | Seek audio back or forward five seconds                     |
@@ -97,6 +93,7 @@ web page.
 | Room                            | `M-p`               | Load older messages                                         |
 | Room                            | `b` / `q`           | Go back                                                     |
 | Composer                        | `C-c C-c`           | Send draft                                                  |
+| Composer                        | `C-u C-c C-c`       | Send and keep the reply target                              |
 | Composer                        | `C-c C-a`           | Add a file to the draft                                     |
 | Composer                        | `C-c C-d`           | Remove a queued attachment                                  |
 | Composer                        | `C-c C-o`           | Preview a queued attachment (`d` removes it)                |
@@ -110,12 +107,10 @@ web page.
 | Attachment preview              | `RET`               | Open in the system viewer                                   |
 | Attachment preview              | `d` / `q`           | Remove attachment / close preview                           |
 
-The room title and topic stay visible above the timeline while you scroll.
-
 Evil starts the home page and chat in normal state, and the composer in insert
-state. Movement and search behave as you'd expect. On the home page, `o` opens a
-room. In a chat, `i` focuses the composer; `r`, `E`, `R`, `x`, and `M` reply,
-edit, react, redact, and mark read. `p` loads history, `T` opens a thread, `J`
+state. On the home page, `o` opens a room. In a chat, `i` focuses the composer;
+`r`, `E`, `R`, `x`, and `M` reply, edit, react, redact, and mark read.
+`p` loads history, `T` opens a thread, `J`
 follows a reply, and `a` attaches a file. `o` and `D` open and save attachments;
 `U` copies the sender ID. Use `g r` to reconnect. The `C-c` keys above work with
 Evil too. In Doom, the same actions are also under your configured localleader:
@@ -142,8 +137,8 @@ previews appear only while a Gomuks buffer is selected. Set
 `gomuks-echo-area-notifications` to `t` to show them everywhere, or `nil` to
 hide them entirely.
 
-Image previews work, but room creation, typing indicators, and Matrix account
-setup aren't in the Emacs interface yet.
+Room creation, typing indicators, and Matrix account setup aren't available
+in the Emacs interface yet.
 
 To run the tests from this directory:
 

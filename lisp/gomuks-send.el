@@ -16,10 +16,16 @@
 (require 'gomuks-content)
 (declare-function gomuks--update-composer-header "gomuks-compose" ())
 (declare-function gomuks--delete-temp-attachments "gomuks-compose" (attachments))
+(declare-function gomuks--finish-reply "gomuks-compose" (send))
+(declare-function gomuks--clear-sent-draft "gomuks-compose" (send))
+(declare-function gomuks--restore-failed-draft "gomuks-compose" (send))
 (declare-function gomuks-compose-mode "gomuks-ui" ())
+;; A non-nil draft-tick marks the emptied composer, not a draft still owned
+;; by this send.  Only an unchanged empty composer can be restored on failure.
 (cl-defstruct (gomuks--send (:constructor gomuks--make-send))
   id phase buffer room backend account text relation remaining attachment
-  caption content event failure timer sticker token (attempt 0))
+  caption content event failure timer sticker token keep-reply draft-tick draft-context
+  (attempt 0))
 (defvar gomuks--sends (make-hash-table :test 'eql) "Owned undelivered send records.")
 (defvar gomuks--send-serial 0 "Monotonic local submission identifier.")
 (defvar gomuks--early-completions nil "Last 64 delivery events, for completion-before-ack races.")
@@ -30,13 +36,17 @@
   (setf (gomuks--send-phase send) phase (gomuks--send-failure send) failure)
   (when (buffer-live-p (gomuks--send-buffer send))
     (with-current-buffer (gomuks--send-buffer send)
-      (setq gomuks--compose-sending (memq phase '(uploading submitting queued checking)))
-      (gomuks--update-composer-header))))
+      (when (eq gomuks--compose-job send)
+        (setq gomuks--compose-sending
+              (and (not (gomuks--send-draft-tick send))
+                   (memq phase '(uploading submitting queued checking))))
+        (gomuks--update-composer-header)))))
 
 (defun gomuks--send-failed (send failure &optional uncertain)
   "Retain SEND and its files for recovery after FAILURE."
   (when (gomuks--send-timer send) (cancel-timer (gomuks--send-timer send)))
   (gomuks--set-send-phase send (if uncertain 'uncertain 'failed) failure)
+  (gomuks--restore-failed-draft send)
   (message "gomuks: %s; C-c C-y opens send recovery" failure))
 
 (defun gomuks--send-key (event)
@@ -71,6 +81,7 @@ Timeline membership still requires SEND to own the current room cache."
   "Procedure: own one SEND request in PHASE and report its tagged OUTCOME.
 START receives a completion callback. The transition owner validates attempts
 and phases; synchronous start failures enter that same owner."
+  (gomuks--clear-sent-draft send)
   (gomuks--set-send-phase send phase)
   (let ((attempt (cl-incf (gomuks--send-attempt send))))
     (condition-case err
@@ -152,15 +163,21 @@ This owns mutable workflow state; it is not a pure transformation."
              (setf (gomuks--send-remaining send) (cdr (gomuks--send-remaining send)))
              (when (buffer-live-p buffer)
                (with-current-buffer buffer
-                 (setq gomuks--compose-attachment (delq attachment gomuks--compose-attachment)))))
+                 (when (eq gomuks--compose-job send)
+                   (setq gomuks--compose-attachment
+                         (delq attachment gomuks--compose-attachment))))))
            (if (gomuks--send-remaining send) (gomuks--send-step send 'next)
              (gomuks--set-send-phase send 'delivered)
              (remhash (gomuks--send-id send) gomuks--sends)
              (when (buffer-live-p buffer)
                (with-current-buffer buffer
-                 (when (equal (gomuks--send-text send) (string-trim-right (buffer-string)))
-                   (erase-buffer) (set-buffer-modified-p nil))
-                 (when (eq gomuks--compose-job send) (setq gomuks--compose-job nil))))
+                 (when (eq gomuks--compose-job send)
+                   (setq gomuks--compose-job nil)
+                   (gomuks--update-composer-header)
+                   (when (and (not (gomuks--send-draft-tick send))
+                              (equal (gomuks--send-text send) (string-trim-right (buffer-string))))
+                     (erase-buffer) (set-buffer-modified-p nil)
+                     (gomuks--finish-reply send)))))
              (message "gomuks: message delivered")))))
       (`(checking . checked)
        (cond
@@ -205,14 +222,14 @@ This owns mutable workflow state; it is not a pure transformation."
       ((and `(,phase . start-failed) (guard (eq phase value)))
        (gomuks--send-failed send failure (eq phase 'checking))))))
 
-(defun gomuks--start-send (buffer room text relation attachments &optional sticker)
+(defun gomuks--start-send (buffer room text relation attachments &optional sticker keep-reply)
   "Procedure: snapshot one submission and transfer its file ownership to a record."
   (let ((send (gomuks--make-send
                :id (cl-incf gomuks--send-serial) :buffer buffer :room room
                :backend gomuks-backend-url :account gomuks--user-id :text text
                :relation (copy-tree relation) :remaining (copy-sequence attachments)
                :token (gomuks--cache-token room)
-               :sticker sticker)))
+               :sticker sticker :keep-reply keep-reply)))
     (puthash (gomuks--send-id send) send gomuks--sends)
     (when (buffer-live-p buffer)
       (with-current-buffer buffer (setq gomuks--compose-job send)))
@@ -270,6 +287,12 @@ This owns mutable workflow state; it is not a pure transformation."
   (interactive)
   (let* ((send (gomuks--choose-send "Restore draft: "))
          (buffer (get-buffer-create (format "*Gomuks recovered draft: %d*" (gomuks--send-id send)))))
+    (when (and (buffer-live-p (gomuks--send-buffer send))
+               (not (eq buffer (gomuks--send-buffer send))))
+      (with-current-buffer (gomuks--send-buffer send)
+        (when (eq gomuks--compose-job send)
+          (setq gomuks--compose-job nil gomuks--compose-sending nil)
+          (gomuks--update-composer-header))))
     (with-current-buffer buffer
       (unless (derived-mode-p 'gomuks-compose-mode) (gomuks-compose-mode))
       (unless (> (buffer-size) 0) (insert (gomuks--send-text send)))
@@ -277,7 +300,7 @@ This owns mutable workflow state; it is not a pure transformation."
             gomuks--compose-relation (gomuks--send-relation send)
             gomuks--compose-attachment (gomuks--send-remaining send)
             gomuks--compose-job send)
-      (setf (gomuks--send-buffer send) buffer)
+      (setf (gomuks--send-buffer send) buffer (gomuks--send-draft-tick send) nil)
       (gomuks--update-composer-header))
     (pop-to-buffer buffer)))
 
@@ -290,7 +313,9 @@ owned temporary files. Check the room before resubmitting an uncertain send."
     (when (yes-or-no-p "Forget this send's tracking? Check delivery before submitting its draft again. ")
       (when (gomuks--send-timer send) (cancel-timer (gomuks--send-timer send)))
       (remhash (gomuks--send-id send) gomuks--sends)
-      (if (buffer-live-p (gomuks--send-buffer send))
+      (if (and (buffer-live-p (gomuks--send-buffer send))
+               (eq (buffer-local-value 'gomuks--compose-job (gomuks--send-buffer send)) send)
+               (not (gomuks--send-draft-tick send)))
           (with-current-buffer (gomuks--send-buffer send)
             (setq gomuks--compose-job nil gomuks--compose-sending nil)
             (gomuks--update-composer-header))

@@ -40,6 +40,7 @@
 (define-key gomuks-room-mode-map (kbd "C-c C-a") #'gomuks-send-file)
 (define-key gomuks-room-mode-map (kbd "C-c C-p") #'gomuks-pick-sticker)
 (define-key gomuks-room-mode-map (kbd "C-c C-g") #'gomuks-send-gif)
+(define-key gomuks-room-mode-map (kbd "C-c C-i") #'gomuks-toggle-inline-images)
 (define-key gomuks-room-mode-map (kbd "C-c C-o") #'gomuks-open-attachment)
 (define-key gomuks-room-mode-map (kbd "C-c C-w") #'gomuks-save-attachment)
 (define-key gomuks-room-mode-map (kbd "C-c C-SPC") #'gomuks-audio-toggle)
@@ -75,6 +76,7 @@
   "Keymap for Gomuks message composer buffers.")
 (define-key gomuks-compose-mode-map (kbd "C-c C-p") #'gomuks-pick-sticker)
 (define-key gomuks-compose-mode-map (kbd "C-c C-g") #'gomuks-send-gif)
+(define-key gomuks-compose-mode-map (kbd "C-c C-i") #'gomuks-toggle-inline-images)
 (define-key gomuks-compose-mode-map (kbd "C-c C-e") #'gomuks-insert-emoji)
 (define-key gomuks-compose-mode-map (kbd "C-c C-v") #'gomuks-paste-image)
 (define-key gomuks-compose-mode-map (kbd "C-k") #'gomuks-switch-room)
@@ -90,6 +92,7 @@
           "a" #'gomuks-send-file
           "p" #'gomuks-pick-sticker
           "g" #'gomuks-send-gif
+          "i" #'gomuks-toggle-inline-images
           "o" #'gomuks-open-attachment
           "SPC" #'gomuks-audio-toggle
           "<" #'gomuks-audio-backward
@@ -113,6 +116,7 @@
           "o" #'gomuks-compose-preview-attachment
           "p" #'gomuks-pick-sticker
           "g" #'gomuks-send-gif
+          "i" #'gomuks-toggle-inline-images
           "e" #'gomuks-insert-emoji
           "n" #'gomuks-toggle-mute
           "v" #'gomuks-paste-image)))
@@ -209,6 +213,7 @@
 		    (kbd "C-c C-f") #'gomuks-search
 		    (kbd "C-c C-p") #'gomuks-pick-sticker
 		    (kbd "C-c C-g") #'gomuks-send-gif
+		    (kbd "C-c C-i") #'gomuks-toggle-inline-images
 		    (kbd "o") #'gomuks-open-attachment
 		    (kbd "d") nil
 		    (kbd "d d") #'gomuks-redact
@@ -227,6 +232,7 @@
 		    (kbd "C-c C-n") #'gomuks-toggle-mute
 		    (kbd "C-c C-p") #'gomuks-pick-sticker
 		    (kbd "C-c C-g") #'gomuks-send-gif
+		    (kbd "C-c C-i") #'gomuks-toggle-inline-images
 		    (kbd "C-c C-e") #'gomuks-insert-emoji
 		    (kbd "C-c C-v") #'gomuks-paste-image
 		    (kbd "C-c C-o") #'gomuks-compose-preview-attachment)

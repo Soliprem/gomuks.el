@@ -20,6 +20,7 @@
 (declare-function notifications-notify "notifications")
 (declare-function emoji--init "emoji")
 (declare-function emoji--read-emoji "emoji")
+(declare-function gomuks--refresh-sticker-pickers "gomuks-stickers" (&optional id fetch))
 
 (defvar-local gomuks--hover-target nil "Details currently displayed in a hover popup.")
 (defvar-local gomuks--hover-message nil "Text currently displayed in this view's popup.")
@@ -224,6 +225,18 @@ INCOMING events extend thread membership, including views currently hidden."
       (let ((buffer (window-buffer window)))
         (when (buffer-local-value 'gomuks--view-dirty buffer)
           (gomuks--refresh-view buffer))))))
+
+(defun gomuks-toggle-inline-images ()
+  "Toggle image and sticker previews across Gomuks views for this session."
+  (interactive)
+  (setq gomuks-inline-images (not gomuks-inline-images))
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (derived-mode-p 'gomuks-room-mode 'gomuks-search-mode)
+        (setq gomuks--view-dirty t))))
+  (gomuks--refresh-visible-views)
+  (gomuks--refresh-sticker-pickers)
+  (message "gomuks: image previews %s" (if gomuks-inline-images "enabled" "disabled")))
 
 (defun gomuks--selected-room-buffer ()
   "Return the main room buffer being viewed, including from its composer."

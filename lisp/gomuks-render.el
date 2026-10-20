@@ -428,6 +428,25 @@ READERS maps displayed event IDs to the public receipts at those positions."
                         nil nil "…")
                        'face 'shadow))))))
 
+(defun gomuks--position-anchor (position)
+  "Remember POSITION as an event row and offset, or an absolute fallback."
+  (if (= position (point-max)) 'end
+    (let* ((row (get-text-property position 'gomuks-event-rowid))
+           (start (and row (text-property-any (point-min) (point-max)
+                                               'gomuks-event-rowid row))))
+      (list row (and start (- position start)) position))))
+
+(defun gomuks--anchor-position (anchor)
+  "Resolve ANCHOR after a timeline redraw, clamping within its event."
+  (if (eq anchor 'end) (point-max)
+    (pcase-let ((`(,row ,offset ,fallback) anchor))
+      (if-let* ((start (and row (text-property-any (point-min) (point-max)
+                                                 'gomuks-event-rowid row))))
+          (min (+ start offset)
+               (1- (next-single-property-change start 'gomuks-event-rowid
+                                                nil (point-max))))
+        (min fallback (point-max))))))
+
 (defun gomuks--render-buffer (buffer id)
   "Write room ID's BUFFER and return its current events for dependency scheduling."
   ;; visible redraw stays O(n); bound or incrementally update history
@@ -443,17 +462,11 @@ READERS maps displayed event IDs to the public receipts at those positions."
                          ('context gomuks--context-events)
                          ('thread gomuks--thread-events)
                          ('room (gethash id gomuks--timelines))))))
-             (at-end (= (point) (point-max)))
-             (rowid (get-text-property (point) 'gomuks-event-rowid))
+             (anchor (gomuks--position-anchor (point)))
              (windows (mapcar (lambda (window)
                                 (list window
-                                      (or (= (window-point window) (point-max))
-                                          (pos-visible-in-window-p
-                                           (max (point-min) (1- (point-max)))
-                                           window))
-                                      (window-start window)
-                                      (get-text-property (window-start window)
-                                                         'gomuks-event-rowid)))
+                                      (gomuks--position-anchor (window-point window))
+                                      (gomuks--position-anchor (window-start window))))
                               (get-buffer-window-list buffer nil t)))
              (thread-counts (when (eq kind 'room) (gomuks--thread-counts id)))
              (readers (gomuks--readers-for-events id events))
@@ -475,30 +488,14 @@ READERS maps displayed event IDs to the public receipts at those positions."
         (dolist (event events)
           (when (gomuks--insert-event event previous thread-counts readers)
             (setq previous event)))
-        (cond
-         (at-end (goto-char (point-max)))
-         (rowid
-          (when-let* ((position (text-property-any
-                                 (point-min) (point-max)
-                                 'gomuks-event-rowid rowid)))
-            (goto-char position))))
+        (goto-char (gomuks--anchor-position anchor))
         (dolist (state windows)
-          (pcase-let ((`(,window ,at-bottom ,start ,start-rowid) state))
+          (pcase-let ((`(,window ,point-anchor ,start-anchor) state))
             (when (window-live-p window)
-              (if at-bottom
-                  (progn
-                    (save-selected-window
-                      (select-window window)
-                      (goto-char (point-max))
-                      (recenter -1))
-                    (set-window-point window (point-max)))
-                (set-window-start
-                 window
-                 (or (and start-rowid
-                          (text-property-any (point-min) (point-max)
-                                             'gomuks-event-rowid start-rowid))
-                     (min start (point-max)))
-                 t)))))
+              (set-window-point window (gomuks--anchor-position point-anchor))
+              (if (eq point-anchor 'end)
+                  (with-selected-window window (recenter -1))
+                (set-window-start window (gomuks--anchor-position start-anchor) t)))))
         (setq gomuks--view-dirty nil)
         events))))
 

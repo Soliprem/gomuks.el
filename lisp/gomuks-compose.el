@@ -24,9 +24,11 @@
     (setq gomuks--compose-attachment (list gomuks--compose-attachment)))
   gomuks--compose-attachment)
 
-(defun gomuks-compose-send ()
-  "Snapshot this draft and retain it until confirmed delivery."
-  (interactive)
+(defun gomuks-compose-send (&optional keep-reply)
+  "Clear this draft immediately and retain its snapshot until delivery.
+After submitting a reply, return to the ordinary room or thread draft.
+With prefix argument KEEP-REPLY, keep composing replies to the same message."
+  (interactive "P")
   (unless (derived-mode-p 'gomuks-compose-mode) (user-error "Not in a Gomuks composer"))
   (when gomuks--compose-sending (user-error "This draft is already being sent"))
   (gomuks--prepare-draft-change)
@@ -37,7 +39,52 @@
                         `((rel_type . "m.thread") (event_id . ,gomuks--thread-root))))))
     (when (and (not attachments) (string-empty-p (string-trim text)))
       (user-error "Message is empty"))
-    (gomuks--start-send (current-buffer) gomuks--room-id text relation attachments)))
+    (gomuks--start-send (current-buffer) gomuks--room-id text relation attachments
+                        nil keep-reply)))
+
+(defun gomuks--clear-sent-draft (send)
+  "Clear SEND's submitted draft, leaving its snapshot owned by SEND."
+  (when (buffer-live-p (gomuks--send-buffer send))
+    (with-current-buffer (gomuks--send-buffer send)
+      (when (and (eq gomuks--compose-job send)
+                 (not (gomuks--send-draft-tick send))
+                 (equal (gomuks--send-text send) (string-trim-right (buffer-string))))
+        (setf (gomuks--send-draft-context send) gomuks--compose-context)
+        (erase-buffer)
+        (set-buffer-modified-p nil)
+        (setq gomuks--compose-attachment nil)
+        (setf (gomuks--send-draft-tick send) (buffer-chars-modified-tick))
+        (gomuks--finish-reply send)))))
+
+(defun gomuks--restore-failed-draft (send)
+  "Restore SEND into its untouched empty draft, preserving newer work."
+  (when (and (gomuks--send-draft-tick send)
+             (buffer-live-p (gomuks--send-buffer send)))
+    (with-current-buffer (gomuks--send-buffer send)
+      (when (eq gomuks--compose-job send)
+        (if (and (= (gomuks--send-draft-tick send) (buffer-chars-modified-tick))
+                 (zerop (buffer-size)) (not gomuks--compose-attachment))
+            (progn
+              (insert (gomuks--send-text send))
+              (setq gomuks--compose-attachment (copy-sequence (gomuks--send-remaining send))
+                    gomuks--compose-relation (copy-tree (gomuks--send-relation send))
+                    gomuks--compose-context (gomuks--send-draft-context send))
+              (setf (gomuks--send-draft-tick send) nil))
+          (setq gomuks--compose-job nil))
+        (gomuks--update-composer-header)))))
+
+(defun gomuks--finish-reply (send)
+  "Leave this submitted reply's composer unless SEND keeps its reply target."
+  (when (and (gomuks--alist 'm.in_reply_to (gomuks--send-relation send))
+             (not (gomuks--send-keep-reply send)))
+    (if (buffer-live-p gomuks--compose-source)
+        (let ((draft (gomuks--composer-buffer gomuks--compose-source)))
+          (dolist (window (get-buffer-window-list (current-buffer) nil t))
+            (set-window-buffer window draft)))
+      (setq gomuks--compose-relation
+            (assq-delete-all 'm.in_reply_to (copy-tree gomuks--compose-relation))
+            gomuks--compose-context nil)
+      (gomuks--update-composer-header))))
 
 (defun gomuks-send-message (&optional text)
   "Compose a message, or submit TEXT with retained delivery recovery."
@@ -145,13 +192,17 @@
     (gomuks--delete-temp-attachments (cl-set-difference staged owned :test #'eq))))
 
 (defun gomuks--prepare-draft-change ()
-  "Procedure: return an unaccepted failed snapshot to this draft for reuse."
+  "Detach a cleared snapshot or return an unaccepted failure to draft ownership."
   (when gomuks--compose-job
-    (if (or (gomuks--send-event gomuks--compose-job)
-            (eq (gomuks--send-phase gomuks--compose-job) 'uncertain))
-        (user-error "Use C-c C-y to recover the previous send before changing or submitting its draft")
+    (cond
+     ((gomuks--send-draft-tick gomuks--compose-job)
+      (setq gomuks--compose-job nil))
+     ((or (gomuks--send-event gomuks--compose-job)
+          (eq (gomuks--send-phase gomuks--compose-job) 'uncertain))
+      (user-error "Use C-c C-y to recover the previous send before changing or submitting its draft"))
+     (t
       (remhash (gomuks--send-id gomuks--compose-job) gomuks--sends)
-      (setq gomuks--compose-job nil))))
+      (setq gomuks--compose-job nil)))))
 
 (defun gomuks--stage-attachment (file temporary &optional label)
   "Queue FILE in this draft until send; delete it later if TEMPORARY.
