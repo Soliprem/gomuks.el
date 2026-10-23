@@ -241,6 +241,9 @@
         (goto-char (point-min))
         (search-forward "Sticker: smile")
         (should (button-at (1- (point))))
+        (should (equal (plist-member (button-get (button-at (1- (point))) 'face)
+                                    :underline)
+                       '(:underline nil)))
         (should (equal (get-text-property (1- (point)) 'display)
                        '(image :type png)))))))
 
@@ -3712,6 +3715,12 @@ functions that start another request and read its current pending marker."
                   (should (equal first-key (get-text-property (point) 'gomuks-sticker-pack-key)))
                   (gomuks-stickers-tab)
                   (should (= images 1))
+                  (save-excursion
+                    (search-forward "▧")
+                    (let ((button (button-at (1- (point)))))
+                      (should (get-text-property (1- (point)) 'display))
+                      (should (equal (plist-member (button-get button 'face) :underline)
+                                     '(:underline nil)))))
                   (should (equal gomuks--expanded-sticker-packs (list first-key)))
                   (let ((folds (length (overlays-in (point-min) (point-max)))))
                     ;; Preview completions and metadata refreshes use this same redraw.

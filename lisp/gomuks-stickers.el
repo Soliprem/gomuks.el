@@ -150,6 +150,7 @@ PACK-KEY is (ROOM-ID . STATE-KEY).  Image usage overrides pack usage."
           (insert "  ")
           (when (and gomuks-inline-images (display-images-p))
             (insert-text-button "▧" 'display preview 'follow-link t
+                                'face '(:inherit button :underline nil)
                                 'help-echo name 'action action 'keymap gomuks-stickers-button-map)
             (insert "  "))
           (insert-text-button name 'follow-link t 'action action 'keymap gomuks-stickers-button-map)

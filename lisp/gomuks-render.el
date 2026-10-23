@@ -208,7 +208,8 @@ Remove the quoted reply fallback for EVENT before rendering."
           (insert "    ")
           (insert-text-button
            (format "[Sticker: %s]" name)
-           'face 'link 'follow-link t
+           ;; An underline crosses the image at its baseline.
+           'face '(:inherit link :underline nil) 'follow-link t
            'help-echo "Open sticker; press D to save"
            'display (when (and gomuks-inline-images cached (display-images-p)
                                (gomuks--preview-file-p cached))
