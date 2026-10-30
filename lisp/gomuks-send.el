@@ -1,4 +1,4 @@
-;;; gomuks-send.el --- Submission and delivery ownership -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
+;;; gomuks-send.el --- Message submission and delivery tracking -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
 
 ;; Copyright (C) 2026 Francesco Prem Solidoro
 ;; Author: Francesco Prem Solidoro <francesco.solidoro@studio.unibo.it>
@@ -6,9 +6,10 @@
 ;; URL: https://github.com/Soliprem/gomuks.el
 
 ;;; Commentary:
-;; A send record owns its snapshot and temporary files until confirmed delivery.
+;; Each submission becomes a send record that keeps a copy of the draft and
+;; its temporary files until the server confirms delivery.
 ;; Phases: uploading -> submitting -> queued -> delivered, or failed/uncertain.
-;; Backend acceptance is not delivery. Retry uses the accepted transaction ID.
+;; Backend acceptance is not delivery.  Retry reuses the accepted transaction ID.
 
 ;;; Code:
 
@@ -32,7 +33,7 @@
 (defvar-local gomuks--compose-job nil "Send record currently associated with this draft.")
 
 (defun gomuks--set-send-phase (send phase &optional failure)
-  "Write SEND's PHASE and FAILURE and update its draft's busy indicator."
+  "Set SEND's PHASE and FAILURE and update its draft's header."
   (setf (gomuks--send-phase send) phase (gomuks--send-failure send) failure)
   (when (buffer-live-p (gomuks--send-buffer send))
     (with-current-buffer (gomuks--send-buffer send)
@@ -50,7 +51,7 @@
   (message "gomuks: %s; C-c C-y opens send recovery" failure))
 
 (defun gomuks--send-key (event)
-  "Transform EVENT into its delivery correlation key."
+  "Return the key that matches EVENT to its send."
   (or (gomuks--alist 'transaction_id event) (gomuks--alist 'rowid event)))
 
 (defun gomuks--send-delivered-p (event)
@@ -59,9 +60,9 @@
     (and (stringp id) (not (string-empty-p id)) (not (string-prefix-p "~" id)))))
 
 (defun gomuks--send-record-event (send event &optional stream)
-  "Procedure: commit EVENT and invalidate once; return non-nil when committed.
-STREAM may update a known room independently of SEND's cache lifetime.
-Timeline membership still requires SEND to own the current room cache."
+  "Store SEND's EVENT and announce its room; return non-nil if stored.
+With STREAM, store it for any known room, even after SEND's room cache was
+reset; it joins the timeline only while SEND's cache is still current."
   (let* ((owned (and send
                      (equal (gomuks--send-backend send) gomuks-backend-url)
                      (equal (gomuks--send-account send) gomuks--user-id)
@@ -74,13 +75,13 @@ Timeline membership still requires SEND to own the current room cache."
         (gomuks--store-timeline (gomuks--send-room send)
                                 `(((event_rowid . ,(gomuks--alist 'rowid event))
                                    (timeline_rowid . ,timeline)))))
-      (gomuks--update-room-views id)
+      (gomuks--announce 'room id)
       t)))
 
 (defun gomuks--send-request (send phase outcome start)
-  "Procedure: own one SEND request in PHASE and report its tagged OUTCOME.
-START receives a completion callback. The transition owner validates attempts
-and phases; synchronous start failures enter that same owner."
+  "Enter PHASE and run START, feeding its result to SEND as OUTCOME.
+START receives a completion callback.  An error while starting is fed to
+`gomuks--send-step' as `start-failed', so every failure takes one path."
   (gomuks--clear-sent-draft send)
   (gomuks--set-send-phase send phase)
   (let ((attempt (cl-incf (gomuks--send-attempt send))))
@@ -91,10 +92,9 @@ and phases; synchronous start failures enter that same owner."
                                (error-message-string err) attempt)))))
 
 (defun gomuks--send-step (send action &optional value failure attempt)
-  "Procedure: interpret SEND's ACTION against its phase and perform its effects.
+  "Advance SEND's state machine by ACTION, given its current phase.
 VALUE and FAILURE carry the outcome; ATTEMPT rejects stale completions.
-The stored-delivery action marks an event already committed by the stream.
-This owns mutable workflow state; it is not a pure transformation."
+The `stored-delivery' action marks an event the stream already stored."
   (when (or (null attempt) (= attempt (gomuks--send-attempt send)))
     (pcase (cons (gomuks--send-phase send) action)
       (`(,_ . next)
@@ -223,7 +223,9 @@ This owns mutable workflow state; it is not a pure transformation."
        (gomuks--send-failed send failure (eq phase 'checking))))))
 
 (defun gomuks--start-send (buffer room text relation attachments &optional sticker keep-reply)
-  "Procedure: snapshot one submission and transfer its file ownership to a record."
+  "Start sending TEXT with RELATION and ATTACHMENTS from draft BUFFER in ROOM.
+STICKER sends the attachment as a sticker; KEEP-REPLY keeps the reply target.
+The new send record takes over the attachments' temporary files."
   (let ((send (gomuks--make-send
                :id (cl-incf gomuks--send-serial) :buffer buffer :room room
                :backend gomuks-backend-url :account gomuks--user-id :text text
@@ -237,7 +239,7 @@ This owns mutable workflow state; it is not a pure transformation."
     send))
 
 (defun gomuks--complete-send (data)
-  "Procedure: correlate a stream delivery DATA with its retained submission."
+  "Match stream delivery DATA to its send, or remember it for a later ack."
   (let* ((event (gomuks--alist 'event data)) (key (gomuks--send-key event)) found recorded)
     (when key
       (maphash (lambda (_id send)
@@ -259,11 +261,12 @@ This owns mutable workflow state; it is not a pure transformation."
   (setq gomuks--early-completions nil))
 
 (defun gomuks--retry-send (send)
-  "Procedure: retry SEND through its transition owner."
+  "Retry SEND."
   (gomuks--send-step send 'retry))
 
 (defun gomuks--choose-send (prompt &optional prefer-draft)
-  "Procedure: choose a recoverable send with PROMPT, optionally PREFER-DRAFT."
+  "Choose a failed send with PROMPT.
+With PREFER-DRAFT, pick the current draft's send without asking."
   (let (choices)
     (maphash (lambda (_id send)
                (when (memq (gomuks--send-phase send) '(failed uncertain))

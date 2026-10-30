@@ -26,6 +26,7 @@
 (defun gomuks ()
   "Connect to gomuks and show its room list."
   (interactive)
+  (gomuks--load-hidden-rooms)
   (unless (or gomuks--skip-auth-source gomuks--password
               (equal gomuks-username ""))
     (when-let* ((credentials (gomuks--auth-source-credentials)))
@@ -39,14 +40,18 @@
   (unless (process-live-p gomuks--stream)
     (gomuks--start-stream)))
 
+(defun gomuks--release-session ()
+  "Cancel requests, make pending sends recoverable and drop downloaded media."
+  (gomuks--cancel-operations)
+  (gomuks--disconnect-sends)
+  (gomuks--clear-media-cache))
+
 (defun gomuks-disconnect ()
   "Stop the live stream and forget the backend password."
   (interactive)
   (gomuks--stop-stream)
   (cl-incf gomuks--cache-generation)
-  (gomuks--cancel-operations)
-  (gomuks--disconnect-sends)
-  (gomuks--clear-media-cache)
+  (gomuks--release-session)
   (setq gomuks--connection-status "Disconnected")
   (gomuks--render-rooms)
   (setq gomuks--password nil)
@@ -81,6 +86,26 @@ With prefix argument CHANGE-CREDENTIALS, ask for a new username too."
   (gomuks--cleanup-sends)
   (gomuks--clear-media-cache))
 
+(defun gomuks--route-change (event &optional data extra)
+  "Update the views, sends and sticker pickers affected by EVENT.
+DATA and EXTRA are described in `gomuks--change-functions'."
+  (pcase event
+    ('status (gomuks--render-rooms))
+    ('room (gomuks--update-room-views data))
+    ('media (gomuks--update-room-views data)
+            (gomuks--refresh-sticker-pickers data))
+    ('decrypted (gomuks--update-room-views data)
+                (gomuks--render-rooms))
+    ('sync (gomuks--show-sync data extra)
+           (let ((account-data (gomuks--alist 'account_data data)))
+             (gomuks--refresh-sticker-pickers
+              nil (or (assq 'm.image_pack.rooms account-data)
+                      (assq 'im.ponies.emote_rooms account-data)))))
+    ('send-complete (gomuks--complete-send data))
+    ('account (gomuks--reset-views)
+              (gomuks--release-session))))
+
+(add-hook 'gomuks--change-functions #'gomuks--route-change)
 (add-hook 'kill-emacs-hook #'gomuks--shutdown)
 (add-function :after after-focus-change-function #'gomuks--maybe-mark-read)
 

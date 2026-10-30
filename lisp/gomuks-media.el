@@ -6,21 +6,30 @@
 ;; URL: https://github.com/Soliprem/gomuks.el
 
 ;;; Commentary:
-;; Own download files, preview limits and playback controls.
+;; Attachment downloads and uploads, the media cache, automatic image
+;; previews and audio playback.
 
 ;;; Code:
 
 (require 'gomuks-backend)
 (require 'gomuks-content)
-(declare-function gomuks--update-room-views "gomuks-view" (id &optional incoming))
-(declare-function gomuks--event-at-point "gomuks-render")
-(declare-function gomuks--refresh-sticker-pickers "gomuks-stickers" (&optional id fetch))
+(require 'browse-url)
 (declare-function empv-play "empv" (uri))
 (declare-function empv-toggle "empv" ())
 (declare-function empv-seek "empv" (target &optional type))
 (declare-function emms-play-file "emms-source-file" (file))
 (declare-function emms-pause "emms" ())
 (declare-function emms-seek "emms" (duration))
+
+(defvar gomuks--media-cache (make-hash-table :test 'equal)
+  "Downloaded media paths keyed by attachment identity.")
+(defvar gomuks--media-pending (make-hash-table :test 'equal)
+  "Callbacks waiting for each in-progress media download.")
+(defvar gomuks--media-failures (make-hash-table :test 'equal)
+  "Attachments whose automatic preview download failed.")
+(defvar gomuks--preview-queue nil "Automatic previews waiting for a download slot.")
+(defvar gomuks--preview-active 0 "Automatic downloads currently running.")
+(defvar gomuks--media-uncached nil "Explicit oversized downloads kept until cleanup.")
 
 (defun gomuks--attachment (content &optional event)
   "Return attachment details from message CONTENT and optional EVENT."
@@ -36,13 +45,12 @@
                       name "attachment")
             :mime (gomuks--alist 'mimetype info)
             :size (gomuks--alist 'size info)
-            :kind (if (equal (or (gomuks--alist 'decrypted_type event)
-                                 (gomuks--alist 'type event)) "m.sticker")
+            :kind (if (equal (gomuks--event-type event) "m.sticker")
                       "m.sticker"
                     (gomuks--alist 'msgtype content))))))
 
 (defun gomuks--audio-control (&optional seconds)
-  "Procedure: toggle playback, or seek SECONDS, through the selected backend."
+  "Toggle playback, or seek SECONDS, through `gomuks-audio-backend'."
   (pcase gomuks-audio-backend
     ('emms
      (unless (require 'emms nil t)
@@ -171,9 +179,6 @@
          (funcall callback failure content)))
      (* 1024 1024) (gomuks--authorization))))
 
-(defvar gomuks--preview-queue nil "Automatic previews waiting for a download slot.")
-(defvar gomuks--preview-active 0 "Automatic downloads currently running.")
-(defvar gomuks--media-uncached nil "Explicit oversized downloads owned until cleanup.")
 
 (defun gomuks--clear-media-cache ()
   "Delete owned media files and discard queued automatic previews."
@@ -185,12 +190,12 @@
   (clrhash gomuks--media-failures))
 
 (defun gomuks--preview-file-p (path)
-  "Query whether PATH's actual file size permits an automatic preview."
+  "Return non-nil when PATH is small enough for an automatic preview."
   (when-let* ((attributes (file-attributes path)))
     (<= (file-attribute-size attributes) gomuks-inline-image-max-bytes)))
 
 (defun gomuks--cache-media (key path)
-  "Own PATH and cache it under KEY, evicting oldest files to respect the quota."
+  "Cache PATH under KEY, evicting the oldest files to stay within the quota."
   (when-let* ((previous (gethash key gomuks--media-cache)))
     (unless (equal previous path) (ignore-errors (delete-file previous)))
     (remhash key gomuks--media-cache))
@@ -227,22 +232,22 @@ Coalesce consumers with the same transfer policy; isolate consumer failures."
       (let ((complete
              (lambda (failure path)
                (let ((callbacks (gethash pending-key gomuks--media-pending)))
-		 (remhash pending-key gomuks--media-pending)
-		 (when path
-		   (let ((extension (file-name-extension (plist-get attachment :name))))
-		     (when (and extension (string-match-p "\\`[[:alnum:]]\\{1,12\\}\\'" extension))
+                 (remhash pending-key gomuks--media-pending)
+                 (when path
+                   (let ((extension (file-name-extension (plist-get attachment :name))))
+                     (when (and extension (string-match-p "\\`[[:alnum:]]\\{1,12\\}\\'" extension))
                        (condition-case err
-			   (let ((named (concat path "." extension)))
-			     (rename-file path named) (setq path named))
-			 (error
-			  (ignore-errors (delete-file path))
-			  (setq path nil failure (error-message-string err)))))))
-		 (if failure (puthash key t gomuks--media-failures)
-		   (gomuks--cache-media key path))
-		 (dolist (fn (reverse callbacks))
-		   (condition-case err (funcall fn path)
-		     (error (message "gomuks: media callback failed: %s"
-				     (error-message-string err)))))))))
+                           (let ((named (concat path "." extension)))
+                             (rename-file path named) (setq path named))
+                         (error
+                          (ignore-errors (delete-file path))
+                          (setq path nil failure (error-message-string err)))))))
+                 (if failure (puthash key t gomuks--media-failures)
+                   (gomuks--cache-media key path))
+                 (dolist (fn (reverse callbacks))
+                   (condition-case err (funcall fn path)
+                     (error (message "gomuks: media callback failed: %s"
+                                     (error-message-string err)))))))))
         (condition-case err
             (gomuks--curl-file (gomuks--media-url attachment) nil complete
                                limit (gomuks--authorization))
@@ -252,7 +257,7 @@ Coalesce consumers with the same transfer policy; isolate consumer failures."
              (signal (car err) (cdr err))))))))))
 
 (defun gomuks--drain-previews ()
-  "Procedure: start valid queued previews while download slots remain."
+  "Start queued previews while download slots remain."
   (while (and gomuks--preview-queue
               (< gomuks--preview-active (max 1 gomuks-preview-concurrency)))
     (pcase-let ((`(,attachment ,id ,token) (pop gomuks--preview-queue)))
@@ -265,14 +270,12 @@ Coalesce consumers with the same transfer policy; isolate consumer failures."
            (cl-decf gomuks--preview-active)
            (unwind-protect
                (when (and path (gomuks--cache-current-p id token))
-                 (gomuks--update-room-views id)
-                 (when (fboundp 'gomuks--refresh-sticker-pickers)
-                   (gomuks--refresh-sticker-pickers id)))
+                 (gomuks--announce 'media id))
              (gomuks--drain-previews)))
          gomuks-inline-image-max-bytes)))))
 
 (defun gomuks--maybe-preview-image (attachment id)
-  "Procedure: queue an eligible automatic ATTACHMENT preview for room ID."
+  "Queue an automatic preview of ATTACHMENT in room ID, if it qualifies."
   (let ((key (gomuks--media-key attachment)) (size (plist-get attachment :size)))
     (when (and gomuks-inline-images (display-images-p)
                (member (plist-get attachment :kind) '("m.image" "m.sticker"))

@@ -6,7 +6,8 @@
 ;; URL: https://github.com/Soliprem/gomuks.el
 
 ;;; Commentary:
-;; Modes and key bindings for the gomuks client.
+;; Major modes, and one table holding every key binding: plain Emacs,
+;; Evil and Doom's localleader.
 
 ;;; Code:
 
@@ -14,137 +15,137 @@
 (require 'gomuks-search)
 (require 'gomuks-reactions)
 (require 'gomuks-stickers)
-(declare-function gomuks-quit "gomuks")
 (declare-function gomuks-reconnect "gomuks")
 (declare-function evil-set-initial-state "evil-core")
 (declare-function evil-define-key* "evil-core")
 
-(defvar gomuks-rooms-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'gomuks-open-room)
-    (define-key map (kbd "g") #'gomuks-reconnect)
-    (define-key map (kbd "q") #'gomuks-quit)
-    (define-key map (kbd "C-k") #'gomuks-switch-room)
-    map)
+(defvar gomuks-rooms-mode-map (make-sparse-keymap)
   "Keymap for the Gomuks home page.")
-(define-key gomuks-rooms-mode-map (kbd "m") #'gomuks-toggle-mute)
-(define-key gomuks-rooms-mode-map (kbd "C-c C-h") #'gomuks-switch-hidden-room)
-(define-key gomuks-rooms-mode-map (kbd "C-c C-x") #'gomuks-toggle-hidden-room)
 (defvar gomuks-room-mode-map (make-sparse-keymap)
   "Keymap for room, thread, and reply context buffers.")
-;; Bind after `defvar' so reloading updates the existing map in a daemon.
-(define-key gomuks-room-mode-map (kbd "C-c C-s") #'gomuks-compose)
-(define-key gomuks-room-mode-map (kbd "C-k") #'gomuks-switch-room)
-(define-key gomuks-room-mode-map (kbd "C-c C-h") #'gomuks-switch-hidden-room)
-(define-key gomuks-room-mode-map (kbd "C-c C-x") #'gomuks-toggle-hidden-room)
-(define-key gomuks-room-mode-map (kbd "C-c C-a") #'gomuks-send-file)
-(define-key gomuks-room-mode-map (kbd "C-c C-p") #'gomuks-pick-sticker)
-(define-key gomuks-room-mode-map (kbd "C-c C-g") #'gomuks-send-gif)
-(define-key gomuks-room-mode-map (kbd "C-c C-i") #'gomuks-toggle-inline-images)
-(define-key gomuks-room-mode-map (kbd "C-c C-o") #'gomuks-open-attachment)
-(define-key gomuks-room-mode-map (kbd "C-c C-w") #'gomuks-save-attachment)
-(define-key gomuks-room-mode-map (kbd "C-c C-SPC") #'gomuks-audio-toggle)
-(define-key gomuks-room-mode-map (kbd "C-c <") #'gomuks-audio-backward)
-(define-key gomuks-room-mode-map (kbd "C-c >") #'gomuks-audio-forward)
-(define-key gomuks-room-mode-map (kbd "RET") #'gomuks-activate-at-point)
-(define-key gomuks-room-mode-map (kbd "o") #'gomuks-open-attachment)
-(define-key gomuks-room-mode-map (kbd "d") nil)
-(define-key gomuks-room-mode-map (kbd "d d") #'gomuks-redact)
-(define-key gomuks-room-mode-map (kbd "D") #'gomuks-save-attachment)
-(define-key gomuks-room-mode-map (kbd "C-c C-r") #'gomuks-reply)
-(define-key gomuks-room-mode-map (kbd "C-c C-e") #'gomuks-edit)
-(define-key gomuks-room-mode-map (kbd "C-c C-+") #'gomuks-react)
-(define-key gomuks-room-mode-map (kbd "C-c C-d") #'gomuks-redact)
-(define-key gomuks-room-mode-map (kbd "C-c C-m") #'gomuks-mark-read)
-(define-key gomuks-room-mode-map (kbd "C-c C-n") #'gomuks-toggle-mute)
-(define-key gomuks-room-mode-map (kbd "C-c C-u") #'gomuks-copy-sender-id)
-(define-key gomuks-room-mode-map (kbd "M-p") #'gomuks-load-history)
-(define-key gomuks-room-mode-map (kbd "C-c C-t") #'gomuks-open-thread)
-(define-key gomuks-room-mode-map (kbd "C-c C-j") #'gomuks-follow-reply)
-(define-key gomuks-room-mode-map (kbd "C-c C-f") #'gomuks-search)
-(define-key gomuks-room-mode-map (kbd "g") #'gomuks-reconnect)
-(define-key gomuks-room-mode-map (kbd "b") #'gomuks-back)
-(define-key gomuks-room-mode-map (kbd "q") #'gomuks-back)
-(defvar gomuks-compose-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-c") #'gomuks-compose-send)
-    (define-key map (kbd "C-c C-k") #'gomuks-compose-leave)
-    (define-key map (kbd "C-c C-a") #'gomuks-send-file)
-    (define-key map (kbd "C-c C-d") #'gomuks-compose-remove-attachment)
-    (define-key map (kbd "C-c C-o") #'gomuks-compose-preview-attachment)
-    map)
+(defvar gomuks-compose-mode-map (make-sparse-keymap)
   "Keymap for Gomuks message composer buffers.")
-(define-key gomuks-compose-mode-map (kbd "C-c C-p") #'gomuks-pick-sticker)
-(define-key gomuks-compose-mode-map (kbd "C-c C-g") #'gomuks-send-gif)
-(define-key gomuks-compose-mode-map (kbd "C-c C-i") #'gomuks-toggle-inline-images)
-(define-key gomuks-compose-mode-map (kbd "C-c C-e") #'gomuks-insert-emoji)
-(define-key gomuks-compose-mode-map (kbd "C-c C-v") #'gomuks-paste-image)
-(define-key gomuks-compose-mode-map (kbd "C-k") #'gomuks-switch-room)
-(define-key gomuks-compose-mode-map (kbd "C-c C-h") #'gomuks-switch-hidden-room)
-(define-key gomuks-compose-mode-map (kbd "C-c C-n") #'gomuks-toggle-mute)
+(defvar gomuks-search-mode-map (make-sparse-keymap)
+  "Keymap for Gomuks search results.")
+(defvar gomuks-reactions-mode-map (make-sparse-keymap)
+  "Keymap for the list of people who reacted to a message.")
+(defvar gomuks-attachment-preview-mode-map (make-sparse-keymap)
+  "Keymap for a staged attachment preview.")
+
+(defconst gomuks--bindings
+  '((gomuks-rooms-mode-map normal
+     ("RET" gomuks-open-room t)
+     (nil gomuks-open-room "o")
+     ("m" gomuks-toggle-mute t)
+     ("C-k" gomuks-switch-room t)
+     ("C-c C-h" gomuks-switch-hidden-room t)
+     ("C-c C-x" gomuks-toggle-hidden-room t)
+     ("g" gomuks-reconnect "g r")
+     ("q" gomuks-quit t))
+    (gomuks-room-mode-map normal
+     ("C-c C-s" gomuks-compose "i" "s")
+     ("C-k" gomuks-switch-room t)
+     ("C-c C-h" gomuks-switch-hidden-room t)
+     ("C-c C-x" gomuks-toggle-hidden-room t)
+     ("C-c C-a" gomuks-send-file "a" "a")
+     ("C-c C-p" gomuks-pick-sticker t "p")
+     ("C-c C-g" gomuks-send-gif t "g")
+     ("C-c C-i" gomuks-toggle-inline-images t "i")
+     ("C-c C-o" gomuks-open-attachment nil "o")
+     ("o" gomuks-open-attachment t)
+     ("C-c C-w" gomuks-save-attachment nil "w")
+     ("D" gomuks-save-attachment t)
+     ("C-c C-SPC" gomuks-audio-toggle nil "SPC")
+     ("C-c <" gomuks-audio-backward nil "<")
+     ("C-c >" gomuks-audio-forward nil ">")
+     ("RET" gomuks-activate-at-point t)
+     ("C-c C-r" gomuks-reply "r" "r")
+     ("C-c C-e" gomuks-edit "E" "e")
+     ("C-c C-+" gomuks-react "R" "+")
+     ("C-c C-d" gomuks-redact "x" "d")
+     ("d d" gomuks-redact t)
+     ("C-c C-m" gomuks-mark-read "M" "m")
+     ("C-c C-n" gomuks-toggle-mute t "n")
+     ("C-c C-u" gomuks-copy-sender-id "U" "u")
+     ("M-p" gomuks-load-history "p")
+     ("C-c C-t" gomuks-open-thread "T" "t")
+     ("C-c C-j" gomuks-follow-reply "J" "j")
+     ("C-c C-f" gomuks-search t "f")
+     ("C-c C-y" gomuks-retry-send)
+     ("g" gomuks-reconnect "g r")
+     ("b" gomuks-back t)
+     ("q" gomuks-back t))
+    (gomuks-compose-mode-map (normal insert)
+     ("C-c C-c" gomuks-compose-send t "c")
+     ("C-c C-k" gomuks-compose-leave t "k")
+     ("C-c C-a" gomuks-send-file t "a")
+     ("C-c C-d" gomuks-compose-remove-attachment t "d")
+     ("C-c C-o" gomuks-compose-preview-attachment t "o")
+     ("C-c C-p" gomuks-pick-sticker t "p")
+     ("C-c C-g" gomuks-send-gif t "g")
+     ("C-c C-i" gomuks-toggle-inline-images t "i")
+     ("C-c C-e" gomuks-insert-emoji t "e")
+     ("C-c C-v" gomuks-paste-image t "v")
+     ("C-c C-n" gomuks-toggle-mute t "n")
+     ("C-c C-y" gomuks-retry-send)
+     ("C-k" gomuks-switch-room t)
+     ("C-c C-h" gomuks-switch-hidden-room t))
+    (gomuks-compose-mode-map normal
+     (nil gomuks-compose-leave "q"))
+    (gomuks-search-mode-map (normal motion)
+     ("RET" gomuks-search-open t)
+     ("n" gomuks-search-more t)
+     ("q" gomuks-search-back t)
+     ("b" gomuks-search-back t)
+     ("C-k" gomuks-switch-room t)
+     ("C-c C-h" gomuks-switch-hidden-room t))
+    (gomuks-reactions-mode-map (normal motion)
+     ("d" gomuks-remove-reaction t)
+     ("q" gomuks-reactions-quit t)
+     ("b" gomuks-reactions-quit t))
+    (gomuks-attachment-preview-mode-map (normal motion)
+     ("RET" gomuks-attachment-preview-open t)
+     ("d" gomuks-attachment-preview-remove t)
+     ("q" quit-window t))
+    (gomuks-stickers-mode-map (normal motion)
+     ("RET" gomuks-stickers-activate t)
+     ("TAB" gomuks-stickers-tab t)
+     ("<backtab>" gomuks-stickers-previous-button t)
+     ("n" gomuks-stickers-next-button t)
+     ("p" gomuks-stickers-previous-button t)
+     ("g" gomuks-stickers-refresh "g r")
+     ("q" quit-window t))
+    (gomuks-stickers-button-map nil
+     ("RET" gomuks-stickers-activate)
+     ("TAB" gomuks-stickers-tab)
+     ("<backtab>" gomuks-stickers-previous-button)))
+  "Every Gomuks key binding, grouped as (KEYMAP EVIL-STATES . BINDINGS).
+Each binding is (KEY COMMAND EVIL LEADER).  KEY is bound in KEYMAP unless
+nil.  EVIL is t to bind KEY in EVIL-STATES too, or another key to bind
+there instead.  LEADER is a key under Doom's localleader.")
+
+(defun gomuks--bind-keys (function)
+  "Call FUNCTION with each keymap, its Evil states and one binding."
+  (dolist (group gomuks--bindings)
+    (dolist (binding (cddr group))
+      (funcall function (symbol-value (car group)) (cadr group) binding))))
+
+;; Binding into existing maps means reloading the file updates a running Emacs.
+(gomuks--bind-keys
+ (lambda (map _states binding)
+   (when (car binding)
+     (define-key map (kbd (car binding)) (cadr binding)))))
 
 ;; Doom's `map!' uses the user's configured localleader and its insert-state
 ;; alternate.  Keep this optional so the package also loads in plain Emacs.
 (when (fboundp 'map!)
-  (eval
-   '(map! :map gomuks-room-mode-map :localleader
-          "s" #'gomuks-compose
-          "a" #'gomuks-send-file
-          "p" #'gomuks-pick-sticker
-          "g" #'gomuks-send-gif
-          "i" #'gomuks-toggle-inline-images
-          "o" #'gomuks-open-attachment
-          "SPC" #'gomuks-audio-toggle
-          "<" #'gomuks-audio-backward
-          ">" #'gomuks-audio-forward
-          "w" #'gomuks-save-attachment
-          "r" #'gomuks-reply
-          "e" #'gomuks-edit
-          "+" #'gomuks-react
-          "d" #'gomuks-redact
-          "m" #'gomuks-mark-read
-          "n" #'gomuks-toggle-mute
-          "u" #'gomuks-copy-sender-id
-          "t" #'gomuks-open-thread
-          "j" #'gomuks-follow-reply
-          "f" #'gomuks-search
-          :map gomuks-compose-mode-map :localleader
-          "c" #'gomuks-compose-send
-          "k" #'gomuks-compose-leave
-          "a" #'gomuks-send-file
-          "d" #'gomuks-compose-remove-attachment
-          "o" #'gomuks-compose-preview-attachment
-          "p" #'gomuks-pick-sticker
-          "g" #'gomuks-send-gif
-          "i" #'gomuks-toggle-inline-images
-          "e" #'gomuks-insert-emoji
-          "n" #'gomuks-toggle-mute
-          "v" #'gomuks-paste-image)))
-(define-key gomuks-room-mode-map (kbd "C-c C-y") #'gomuks-retry-send)
-(define-key gomuks-compose-mode-map (kbd "C-c C-y") #'gomuks-retry-send)
-
-(defvar gomuks-search-mode-map (make-sparse-keymap)
-  "Keymap for Gomuks search results.")
-(define-key gomuks-search-mode-map (kbd "RET") #'gomuks-search-open)
-(define-key gomuks-search-mode-map (kbd "n") #'gomuks-search-more)
-(define-key gomuks-search-mode-map (kbd "q") #'gomuks-search-back)
-(define-key gomuks-search-mode-map (kbd "b") #'gomuks-search-back)
-(define-key gomuks-search-mode-map (kbd "C-k") #'gomuks-switch-room)
-(define-key gomuks-search-mode-map (kbd "C-c C-h") #'gomuks-switch-hidden-room)
-(defvar gomuks-reactions-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "d") #'gomuks-remove-reaction)
-    (define-key map (kbd "q") #'gomuks-reactions-quit)
-    (define-key map (kbd "b") #'gomuks-reactions-quit)
-    map)
-  "Keymap for the list of people who reacted to a message.")
-(defvar gomuks-attachment-preview-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'gomuks-attachment-preview-open)
-    (define-key map (kbd "d") #'gomuks-attachment-preview-remove)
-    (define-key map (kbd "q") #'quit-window)
-    map)
-  "Keymap for a staged attachment preview.")
+  (let (forms)
+    (dolist (group gomuks--bindings)
+      (let ((keys (cl-loop for (_key command _evil leader) in (cddr group)
+                           when leader append (list leader `#',command))))
+        (when keys
+          (setq forms (append forms (list :map (car group) :localleader) keys)))))
+    (eval `(map! ,@forms) t)))
 
 (define-derived-mode gomuks-rooms-mode special-mode "Gomuks rooms"
   "Mode for the gomuks room list."
@@ -175,92 +176,20 @@
 (define-derived-mode gomuks-attachment-preview-mode special-mode "Gomuks attachment"
   "Mode for previewing an attachment staged in a draft.")
 
-;; Evil's normal-state maps take precedence over the ordinary major-mode map.
-;; Keep Vim motion keys intact; use keys that would edit a read-only buffer.
+;; Evil's state maps take precedence over the major-mode map, so keys that
+;; Evil uses in normal state are bound again there.
 (with-eval-after-load 'evil
-  (evil-set-initial-state 'gomuks-rooms-mode 'normal)
-  (evil-set-initial-state 'gomuks-room-mode 'normal)
+  (dolist (mode '(gomuks-rooms-mode gomuks-room-mode gomuks-search-mode
+                  gomuks-reactions-mode gomuks-attachment-preview-mode
+                  gomuks-stickers-mode))
+    (evil-set-initial-state mode 'normal))
   (evil-set-initial-state 'gomuks-compose-mode 'insert)
-  (evil-set-initial-state 'gomuks-search-mode 'normal)
-  (evil-set-initial-state 'gomuks-reactions-mode 'normal)
-  (evil-set-initial-state 'gomuks-attachment-preview-mode 'normal)
-  (evil-set-initial-state 'gomuks-stickers-mode 'normal)
-  (evil-define-key* 'normal gomuks-rooms-mode-map
-		    (kbd "RET") #'gomuks-open-room
-		    (kbd "o") #'gomuks-open-room
-		    (kbd "m") #'gomuks-toggle-mute
-		    (kbd "C-c C-h") #'gomuks-switch-hidden-room
-		    (kbd "C-c C-x") #'gomuks-toggle-hidden-room
-		    (kbd "C-k") #'gomuks-switch-room
-		    (kbd "q") #'gomuks-quit
-		    (kbd "g r") #'gomuks-reconnect)
-  (evil-define-key* 'normal gomuks-room-mode-map
-		    (kbd "C-k") #'gomuks-switch-room
-		    (kbd "C-c C-h") #'gomuks-switch-hidden-room
-		    (kbd "C-c C-x") #'gomuks-toggle-hidden-room
-		    (kbd "i") #'gomuks-compose
-		    (kbd "a") #'gomuks-send-file
-		    (kbd "r") #'gomuks-reply
-		    (kbd "E") #'gomuks-edit
-		    (kbd "R") #'gomuks-react
-		    (kbd "x") #'gomuks-redact
-		    (kbd "M") #'gomuks-mark-read
-		    (kbd "C-c C-n") #'gomuks-toggle-mute
-		    (kbd "U") #'gomuks-copy-sender-id
-		    (kbd "p") #'gomuks-load-history
-		    (kbd "T") #'gomuks-open-thread
-		    (kbd "J") #'gomuks-follow-reply
-		    (kbd "C-c C-f") #'gomuks-search
-		    (kbd "C-c C-p") #'gomuks-pick-sticker
-		    (kbd "C-c C-g") #'gomuks-send-gif
-		    (kbd "C-c C-i") #'gomuks-toggle-inline-images
-		    (kbd "o") #'gomuks-open-attachment
-		    (kbd "d") nil
-		    (kbd "d d") #'gomuks-redact
-		    (kbd "D") #'gomuks-save-attachment
-		    (kbd "RET") #'gomuks-activate-at-point
-		    (kbd "b") #'gomuks-back
-		    (kbd "q") #'gomuks-back
-		    (kbd "g r") #'gomuks-reconnect)
-  (evil-define-key* '(normal insert) gomuks-compose-mode-map
-		    (kbd "C-k") #'gomuks-switch-room
-		    (kbd "C-c C-h") #'gomuks-switch-hidden-room
-		    (kbd "C-c C-c") #'gomuks-compose-send
-		    (kbd "C-c C-k") #'gomuks-compose-leave
-		    (kbd "C-c C-a") #'gomuks-send-file
-		    (kbd "C-c C-d") #'gomuks-compose-remove-attachment
-		    (kbd "C-c C-n") #'gomuks-toggle-mute
-		    (kbd "C-c C-p") #'gomuks-pick-sticker
-		    (kbd "C-c C-g") #'gomuks-send-gif
-		    (kbd "C-c C-i") #'gomuks-toggle-inline-images
-		    (kbd "C-c C-e") #'gomuks-insert-emoji
-		    (kbd "C-c C-v") #'gomuks-paste-image
-		    (kbd "C-c C-o") #'gomuks-compose-preview-attachment)
-  (evil-define-key* 'normal gomuks-compose-mode-map
-		    (kbd "q") #'gomuks-compose-leave)
-  (evil-define-key* '(normal motion) gomuks-search-mode-map
-		    (kbd "C-k") #'gomuks-switch-room
-		    (kbd "C-c C-h") #'gomuks-switch-hidden-room
-		    (kbd "RET") #'gomuks-search-open
-		    (kbd "n") #'gomuks-search-more
-		    (kbd "q") #'gomuks-search-back
-		    (kbd "b") #'gomuks-search-back)
-  (evil-define-key* '(normal motion) gomuks-reactions-mode-map
-		    (kbd "d") #'gomuks-remove-reaction
-		    (kbd "q") #'gomuks-reactions-quit
-		    (kbd "b") #'gomuks-reactions-quit)
-  (evil-define-key* '(normal motion) gomuks-attachment-preview-mode-map
-		    (kbd "RET") #'gomuks-attachment-preview-open
-		    (kbd "d") #'gomuks-attachment-preview-remove
-		    (kbd "q") #'quit-window)
-  (evil-define-key* '(normal motion) gomuks-stickers-mode-map
-                    (kbd "RET") #'gomuks-stickers-activate
-                    (kbd "TAB") #'gomuks-stickers-tab
-                    (kbd "<backtab>") #'gomuks-stickers-previous-button
-                    (kbd "n") #'gomuks-stickers-next-button
-                    (kbd "p") #'gomuks-stickers-previous-button
-                    (kbd "g r") #'gomuks-stickers-refresh
-                    (kbd "q") #'quit-window))
+  (gomuks--bind-keys
+   (lambda (map states binding)
+     (pcase-let ((`(,key ,command ,evil) binding))
+       (when (and states evil)
+         (evil-define-key* states map
+                           (kbd (if (eq evil t) key evil)) command))))))
 
 (add-hook 'window-buffer-change-functions #'gomuks--refresh-visible-views)
 

@@ -6,7 +6,8 @@
 ;; URL: https://github.com/Soliprem/gomuks.el
 
 ;;; Commentary:
-;; Own draft buffers and staged files. Delivery lifecycle lives in gomuks-send.
+;; Draft buffers, staged attachments and the commands that write messages.
+;; Once submitted, a draft's delivery is tracked by gomuks-send.
 
 ;;; Code:
 
@@ -15,14 +16,17 @@
 (declare-function gomuks-compose-mode "gomuks-ui")
 (declare-function gomuks-attachment-preview-mode "gomuks-ui")
 (declare-function gomuks-home "gomuks-view")
-(declare-function gomuks--event-at-point "gomuks-render")
 (declare-function evil-insert-state "evil-commands")
 
-(defun gomuks--pending-attachments ()
-  "Return this draft's attachments, migrating an older single entry."
-  (when (stringp (car-safe gomuks--compose-attachment))
-    (setq gomuks--compose-attachment (list gomuks--compose-attachment)))
-  gomuks--compose-attachment)
+(defvar-local gomuks--preview-source nil
+  "Composer buffer associated with this attachment preview.")
+(defvar-local gomuks--preview-attachment nil
+  "Attachment entry displayed in this preview.")
+
+(defun gomuks--require-composer ()
+  "Signal a user error unless the current buffer is a Gomuks draft."
+  (unless (derived-mode-p 'gomuks-compose-mode)
+    (user-error "Focus a Gomuks draft first")))
 
 (defun gomuks-compose-send (&optional keep-reply)
   "Clear this draft immediately and retain its snapshot until delivery.
@@ -33,10 +37,8 @@ With prefix argument KEEP-REPLY, keep composing replies to the same message."
   (when gomuks--compose-sending (user-error "This draft is already being sent"))
   (gomuks--prepare-draft-change)
   (let ((text (string-trim-right (buffer-substring-no-properties (point-min) (point-max))))
-        (attachments (gomuks--pending-attachments))
-        (relation (or gomuks--compose-relation
-                      (when gomuks--thread-root
-                        `((rel_type . "m.thread") (event_id . ,gomuks--thread-root))))))
+        (attachments gomuks--compose-attachment)
+        (relation (or gomuks--compose-relation (gomuks--thread-relation))))
     (when (and (not attachments) (string-empty-p (string-trim text)))
       (user-error "Message is empty"))
     (gomuks--start-send (current-buffer) gomuks--room-id text relation attachments
@@ -92,15 +94,12 @@ With prefix argument KEEP-REPLY, keep composing replies to the same message."
   (unless (derived-mode-p 'gomuks-room-mode) (user-error "Open a gomuks room first"))
   (if (null text) (gomuks-compose)
     (when (string-empty-p (string-trim text)) (user-error "Message is empty"))
-    (gomuks--start-send nil gomuks--room-id text
-                        (when gomuks--thread-root
-                          `((rel_type . "m.thread") (event_id . ,gomuks--thread-root))) nil)))
+    (gomuks--start-send nil gomuks--room-id text (gomuks--thread-relation) nil)))
 
 (defun gomuks-insert-emoji ()
   "Search for an emoji and insert it into the current draft."
   (interactive)
-  (unless (derived-mode-p 'gomuks-compose-mode)
-    (user-error "Focus a Gomuks draft first"))
+  (gomuks--require-composer)
   (if (fboundp 'emoji-search)
       (call-interactively #'emoji-search)
     (insert (read-char-by-name "Emoji: "))))
@@ -166,7 +165,7 @@ With prefix argument KEEP-REPLY, keep composing replies to the same message."
 
 (defun gomuks--update-composer-header ()
   "Show the current draft target and pending attachment in the header."
-  (let ((attachments (gomuks--pending-attachments)))
+  (let ((attachments gomuks--compose-attachment))
     (setq header-line-format
           (concat " " (or gomuks--compose-context
                           (and gomuks--room-id
@@ -187,12 +186,16 @@ With prefix argument KEEP-REPLY, keep composing replies to the same message."
   (let* ((owned (and gomuks--compose-job
                      (gethash (gomuks--send-id gomuks--compose-job) gomuks--sends)
                      (gomuks--send-remaining gomuks--compose-job)))
-         (staged (gomuks--pending-attachments)))
+         (staged gomuks--compose-attachment))
     (setq gomuks--compose-attachment nil)
     (gomuks--delete-temp-attachments (cl-set-difference staged owned :test #'eq))))
 
 (defun gomuks--prepare-draft-change ()
-  "Detach a cleared snapshot or return an unaccepted failure to draft ownership."
+  "Detach this draft from its last send so the draft can change.
+A send that already cleared the draft is just detached.  A send that failed
+before the backend accepted it is dropped, and the draft keeps its files.
+Refuse while the draft still holds an accepted or uncertain send; recover
+that with \\[gomuks-retry-send] first."
   (when gomuks--compose-job
     (cond
      ((gomuks--send-draft-tick gomuks--compose-job)
@@ -207,14 +210,12 @@ With prefix argument KEEP-REPLY, keep composing replies to the same message."
 (defun gomuks--stage-attachment (file temporary &optional label)
   "Queue FILE in this draft until send; delete it later if TEMPORARY.
 LABEL is shown in the composer header."
-  (unless (derived-mode-p 'gomuks-compose-mode)
-    (user-error "Focus a Gomuks draft first"))
+  (gomuks--require-composer)
   (when gomuks--compose-sending
     (user-error "This draft is already being sent"))
   (gomuks--prepare-draft-change)
   (unless (file-regular-p file)
     (user-error "Attachment file does not exist"))
-  (gomuks--pending-attachments)
   (add-hook 'kill-buffer-hook #'gomuks--cleanup-compose-attachment nil t)
   (setq gomuks--compose-attachment
         (append gomuks--compose-attachment
@@ -227,7 +228,7 @@ LABEL is shown in the composer header."
 
 (defun gomuks--attachment-choices ()
   "Return numbered completion choices for this draft's attachments."
-  (cl-loop for attachment in (gomuks--pending-attachments)
+  (cl-loop for attachment in gomuks--compose-attachment
            for index from 1
            for file = (car attachment)
            for size = (when-let* ((attributes (file-attributes file)))
@@ -248,14 +249,13 @@ LABEL is shown in the composer header."
 (defun gomuks-compose-remove-attachment (&optional attachment)
   "Remove ATTACHMENT from this draft, prompting when needed."
   (interactive)
-  (unless (derived-mode-p 'gomuks-compose-mode)
-    (user-error "Focus a Gomuks draft first"))
+  (gomuks--require-composer)
   (when gomuks--compose-sending
     (user-error "This draft is already being sent"))
   (gomuks--prepare-draft-change)
   (setq attachment (or attachment
                        (gomuks--choose-attachment "Remove attachment: ")))
-  (unless (memq attachment (gomuks--pending-attachments))
+  (unless (memq attachment gomuks--compose-attachment)
     (user-error "That attachment is no longer in this draft"))
   (setq gomuks--compose-attachment
         (delq attachment gomuks--compose-attachment))
@@ -266,8 +266,7 @@ LABEL is shown in the composer header."
 (defun gomuks-compose-preview-attachment ()
   "Preview a staged attachment and offer to remove it."
   (interactive)
-  (unless (derived-mode-p 'gomuks-compose-mode)
-    (user-error "Focus a Gomuks draft first"))
+  (gomuks--require-composer)
   (let* ((source (current-buffer))
          (attachment (gomuks--choose-attachment "Preview attachment: "))
          (file (car attachment))
@@ -382,9 +381,7 @@ and INITIAL-TEXT seeds a newly created draft."
   (interactive)
   (let ((event-id (gomuks--alist 'event_id (gomuks--event-at-point))))
     (unless event-id (user-error "This message has no event ID yet"))
-    (let ((relation (append (when gomuks--thread-root
-                              `((rel_type . "m.thread")
-                                (event_id . ,gomuks--thread-root)))
+    (let ((relation (append (gomuks--thread-relation)
                             `((m.in_reply_to . ((event_id . ,event-id)))))))
       (if text
           (gomuks--send-related text relation)
@@ -410,18 +407,16 @@ and INITIAL-TEXT seeds a newly created draft."
           (gomuks--edit-source event)))))))
 
 (defun gomuks-send-file (file &optional sticker delete-after-upload)
-  "Stage FILE in a composer, or submit it with recoverable delivery ownership.
-STICKER sends native sticker content. DELETE-AFTER-UPLOAD means the temporary
-file is owned until confirmed delivery, rather than merely until upload."
+  "Stage FILE in a composer, or send it right away from a room.
+STICKER sends it as a sticker.  DELETE-AFTER-UPLOAD marks FILE as temporary:
+it is deleted after confirmed delivery, or when removed from the draft."
   (interactive "fFile to send: ")
   (unless gomuks--room-id (user-error "Open a room first"))
   (if (and (not sticker) (derived-mode-p 'gomuks-compose-mode))
       (gomuks--stage-attachment file delete-after-upload)
     (gomuks--start-send
      nil gomuks--room-id ""
-     (or gomuks--compose-relation
-         (when gomuks--thread-root
-           `((rel_type . "m.thread") (event_id . ,gomuks--thread-root))))
+     (or gomuks--compose-relation (gomuks--thread-relation))
      (list (list file delete-after-upload (file-name-nondirectory file))) sticker)))
 
 (defun gomuks-send-sticker (file)
@@ -437,8 +432,7 @@ file is owned until confirmed delivery, rather than merely until upload."
 (defun gomuks-paste-image ()
   "Attach an image from the graphical clipboard to the current draft."
   (interactive)
-  (unless (derived-mode-p 'gomuks-compose-mode)
-    (user-error "Focus a Gomuks draft first"))
+  (gomuks--require-composer)
   (unless (display-graphic-p)
     (user-error "Image paste needs a graphical Emacs frame"))
   (let ((image

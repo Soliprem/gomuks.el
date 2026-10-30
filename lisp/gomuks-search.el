@@ -1,4 +1,4 @@
-;;; gomuks-search.el --- Room search workflows -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
+;;; gomuks-search.el --- Room search -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
 
 ;; Copyright (C) 2026 Francesco Prem Solidoro
 ;; Author: Francesco Prem Solidoro <francesco.solidoro@studio.unibo.it>
@@ -6,7 +6,7 @@
 ;; URL: https://github.com/Soliprem/gomuks.el
 
 ;;; Commentary:
-;; Feature procedures capture room and view ownership before issuing effects.
+;; Search the history Gomuks has fetched for one room, page by page.
 
 ;;; Code:
 
@@ -14,7 +14,8 @@
 (declare-function gomuks-search-mode "gomuks-ui" ())
 
 (defun gomuks--search-fetch (&optional more)
-  "Procedure: request one search page, suppressing concurrent and repeated pages."
+  "Request the first page of results, or with MORE the next one.
+Do nothing while a page is loading; stop when the backend repeats a token."
   (unless gomuks--search-loading
     (if (and more (not gomuks--search-next-batch))
         (message "gomuks: no more search results")
@@ -36,18 +37,15 @@
                               (gomuks--event-rows (append (and more gomuks--search-results)
                                                           (gomuks--alist 'events response)))
                               gomuks--search-next-batch
-                              (let ((next (gomuks--alist 'next_batch response)))
-                                (and (stringp next) (not (string-empty-p next))
-                                     (not (equal next token)) next))))
+                              (gomuks--next-token response 'next_batch token)))
                       (gomuks--render-search)))))))
         (setq gomuks--search-loading t gomuks--search-error nil)
         (gomuks--render-search)
-        (condition-case err
-            (gomuks--post "search_local"
-                          (append `((search_term . ,query) (room_ids . ,(vector id))
-                                    (limit . 50) (sort_by_time . t))
-                                  (when token `((next_batch . ,token)))) complete)
-          (error (funcall complete (error-message-string err) nil)))))))
+        (gomuks--post "search_local"
+                      (append `((search_term . ,query) (room_ids . ,(vector id))
+                                (limit . 50) (sort_by_time . t))
+                              (when token `((next_batch . ,token))))
+                      complete)))))
 
 (defun gomuks-search ()
   "Search the backend's local history for messages in this room."

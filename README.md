@@ -140,8 +140,14 @@ hide them entirely.
 Room creation, typing indicators, and Matrix account setup aren't available
 in the Emacs interface yet.
 
-To run the tests from this directory:
+To run every check from this directory:
 
 ```sh
-emacs -Q --batch -L . -l gomuks-tests.el -f ert-run-tests-batch-and-exit
+emacs -Q --batch -l test/check.el
 ```
+
+This compiles each module on its own with warnings treated as errors, runs
+the tests, and makes real HTTP and curl transfers against a loopback server
+inside Emacs. Name checks to run only some of them, as in
+`emacs -Q --batch -l test/check.el tests`; the others are `compile` and
+`http`. Run it with another Emacs binary to check that version.

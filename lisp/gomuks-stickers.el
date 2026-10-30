@@ -24,7 +24,8 @@
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map button-map)
     map)
-  "Button keymap that keeps the picker's folding and navigation bindings.")
+  "Button keymap that keeps the picker's folding and navigation bindings.
+Its keys are listed in `gomuks--bindings'.")
 
 (defun gomuks--sticker-pack-keys (id)
   "Return unique (ROOM-ID . STATE-KEY) packs available in room ID."
@@ -47,7 +48,7 @@
     (nreverse keys)))
 
 (defun gomuks--sticker-packs (id)
-  "Query sticker content from room ID's available image packs.
+  "Return the sticker packs available in room ID.
 Each result is (PACK-KEY PACK-NAME . CONTENTS).
 PACK-KEY is (ROOM-ID . STATE-KEY).  Image usage overrides pack usage."
   (let (packs)
@@ -93,11 +94,8 @@ PACK-KEY is (ROOM-ID . STATE-KEY).  Image usage overrides pack usage."
   (with-current-buffer gomuks--sticker-source
     (when (equal (gomuks--alist 'rel_type gomuks--compose-relation) "m.replace")
       (user-error "Leave the edit draft before sending a sticker"))
-    (gomuks--send-related
-     "" (or gomuks--compose-relation
-            (when gomuks--thread-root
-              `((rel_type . "m.thread") (event_id . ,gomuks--thread-root))))
-     content))
+    (gomuks--send-related "" (or gomuks--compose-relation (gomuks--thread-relation))
+                          content))
   (quit-window))
 
 (defun gomuks--render-stickers ()
@@ -128,7 +126,7 @@ PACK-KEY is (ROOM-ID . STATE-KEY).  Image usage overrides pack usage."
         (insert "* ")
         (insert-text-button
          (format "%s %s (%d)" (if expanded "▾" "▸")
-                 (replace-regexp-in-string "[\n\r]+" " " (cadr pack)) (length (cddr pack)))
+                 (gomuks--one-line (cadr pack)) (length (cddr pack)))
          'face 'gomuks-heading-face 'follow-link t 'keymap gomuks-stickers-button-map
          'action (lambda (button)
                    (goto-char (button-start button))
@@ -137,7 +135,7 @@ PACK-KEY is (ROOM-ID . STATE-KEY).  Image usage overrides pack usage."
         (insert "\n\n"))
       (dolist (content (cddr pack))
         (let* ((start (point))
-               (name (replace-regexp-in-string "[\n\r]+" " " (gomuks--alist 'body content)))
+               (name (gomuks--one-line (gomuks--alist 'body content)))
                (attachment (gomuks--attachment content))
                (cached (gomuks--cached-media attachment))
                (preview (when (and (member (car pack) gomuks--expanded-sticker-packs)
@@ -261,46 +259,34 @@ FETCH reloads pack metadata after a subscription change."
     (setq gomuks--sticker-loading (length requests) gomuks--sticker-errors nil)
     (gomuks--render-stickers)
     (dolist (request requests)
-      (let ((complete
-             (lambda (failure events)
-               (when (and (buffer-live-p buffer) (gomuks--cache-current-p id token)
-                          (= serial (buffer-local-value 'gomuks--view-generation buffer)))
-                 (with-current-buffer buffer
-                   (when (gomuks--sticker-source-current-p)
-                     (cl-decf gomuks--sticker-loading)
-                     (if failure (push (concat "Could not load packs: " failure) gomuks--sticker-errors)
-                       (gomuks--store-image-packs
-                        (cl-remove-if-not
-                         (lambda (event)
-                           (let* ((room (gomuks--alist 'room_id event))
-                                  (key (cons (gomuks--alist 'type event)
-                                             (or (gomuks--alist 'state_key event) "")))
-                                  (state (gethash room gomuks--image-pack-state))
-                                  (row (and state (gethash key state))))
-                             (and (or (equal room id)
-                                      (when-let* ((owner (assoc room room-tokens)))
-                                        (gomuks--cache-current-p room (cdr owner))))
-                                  (equal (gethash (cons room key) pack-state)
-                                         (and row (cons row (gethash row gomuks--events)))))))
-                         events)))
-                     (gomuks--render-stickers)
-                     (gomuks--preview-visible-stickers)))))))
-        (condition-case err
-            (gomuks--post (car request) (cadr request) complete)
-          (error (funcall complete (error-message-string err) nil)))))))
+      (gomuks--post
+       (car request) (cadr request)
+       (lambda (failure events)
+         (when (and (buffer-live-p buffer) (gomuks--cache-current-p id token)
+                    (= serial (buffer-local-value 'gomuks--view-generation buffer)))
+           (with-current-buffer buffer
+             (when (gomuks--sticker-source-current-p)
+               (cl-decf gomuks--sticker-loading)
+               (if failure (push (concat "Could not load packs: " failure) gomuks--sticker-errors)
+                 (gomuks--store-image-packs
+                  (cl-remove-if-not
+                   (lambda (event)
+                     (let* ((room (gomuks--alist 'room_id event))
+                            (key (cons (gomuks--alist 'type event)
+                                       (or (gomuks--alist 'state_key event) "")))
+                            (state (gethash room gomuks--image-pack-state))
+                            (row (and state (gethash key state))))
+                       (and (or (equal room id)
+                                (when-let* ((owner (assoc room room-tokens)))
+                                  (gomuks--cache-current-p room (cdr owner))))
+                            (equal (gethash (cons room key) pack-state)
+                                   (and row (cons row (gethash row gomuks--events)))))))
+                   events)))
+               (gomuks--render-stickers)
+               (gomuks--preview-visible-stickers)))))))))
 
 (defvar gomuks-stickers-mode-map (make-sparse-keymap)
-  "Keymap for selecting a synced Matrix sticker.")
-(define-key gomuks-stickers-mode-map (kbd "RET") #'gomuks-stickers-activate)
-(define-key gomuks-stickers-mode-map (kbd "TAB") #'gomuks-stickers-tab)
-(define-key gomuks-stickers-mode-map (kbd "<backtab>") #'gomuks-stickers-previous-button)
-(define-key gomuks-stickers-mode-map (kbd "n") #'gomuks-stickers-next-button)
-(define-key gomuks-stickers-mode-map (kbd "p") #'gomuks-stickers-previous-button)
-(define-key gomuks-stickers-mode-map (kbd "g") #'gomuks-stickers-refresh)
-(define-key gomuks-stickers-mode-map (kbd "q") #'quit-window)
-(define-key gomuks-stickers-button-map (kbd "RET") #'gomuks-stickers-activate)
-(define-key gomuks-stickers-button-map (kbd "TAB") #'gomuks-stickers-tab)
-(define-key gomuks-stickers-button-map (kbd "<backtab>") #'gomuks-stickers-previous-button)
+  "Keymap for selecting a synced Matrix sticker; see `gomuks--bindings'.")
 
 (define-derived-mode gomuks-stickers-mode special-mode "Gomuks stickers"
   "Browse folded sticker packs, expanding headings with TAB or RET.

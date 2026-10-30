@@ -6,19 +6,37 @@
 ;; URL: https://github.com/Soliprem/gomuks.el
 
 ;;; Commentary:
-;; Each operation has one terminal path: cleanup, then exactly one callback.
-;; This module knows no room buffers or drafts. The SSE stream has its own owner.
+;; HTTP requests and curl transfers with deadlines.  Every operation ends once:
+;; it cleans up, then calls its callback exactly once.  The event stream
+;; lives in gomuks-backend.
 
 ;;; Code:
 
 (require 'gomuks-core)
+(require 'json)
+(require 'url)
+(require 'url-http)
+
+(defun gomuks--url (path)
+  "Return the backend URL for relative API PATH."
+  (concat (replace-regexp-in-string "/+$" "" gomuks-backend-url)
+          "/_gomuks/" path))
+
+(defun gomuks--authorization ()
+  "Return the configured backend Basic authorization header, if any."
+  (when (and gomuks-username gomuks--password)
+    (concat "Basic "
+            (base64-encode-string
+             (encode-coding-string (concat gomuks-username ":" gomuks--password)
+                                   'utf-8) t))))
+
 (defvar gomuks--operations (make-hash-table :test 'eq)
   "Live ordinary requests and transfers, keyed by operation record.")
 (cl-defstruct (gomuks--operation (:constructor gomuks--make-operation))
   done timer cancel cleanup callback)
 
 (defun gomuks--begin-operation (callback timeout cleanup)
-  "Own a new operation with CALLBACK, TIMEOUT and terminal CLEANUP."
+  "Register an operation that ends with CLEANUP and CALLBACK after TIMEOUT."
   (let ((op (gomuks--make-operation :callback callback :cleanup cleanup)))
     (puthash op t gomuks--operations)
     (setf (gomuks--operation-timer op)
@@ -115,14 +133,26 @@
        op))))
 
 (defun gomuks--post (command data callback)
-  "Encode JSON DATA and request backend COMMAND, then call CALLBACK."
-  (gomuks--request (concat "exec/" command)
-                   (encode-coding-string (json-serialize data) 'utf-8) callback))
+  "Send JSON DATA to backend COMMAND and call CALLBACK once with error/value.
+A request that cannot start reports its error through CALLBACK too."
+  (let (called)
+    (condition-case err
+        (gomuks--request (concat "exec/" command)
+                         (encode-coding-string (json-serialize data) 'utf-8)
+                         (lambda (failure value)
+                           (setq called t)
+                           (funcall callback failure value)))
+      (error
+       (if called (signal (car err) (cdr err))
+         (funcall callback (concat "request could not start: "
+                                   (error-message-string err))
+                  nil))))))
 
 (defun gomuks--curl-file (url arguments callback &optional limit authorization)
-  "Download URL to an owned file with ARGUMENTS; CALLBACK receives error/path.
+  "Download URL to a temporary file with curl ARGUMENTS.
+CALLBACK receives an error or the file's path.
 LIMIT caps actual bytes, including chunked or misleading responses. Successful
-file ownership transfers to CALLBACK. AUTHORIZATION is sent through stdin."
+files belong to CALLBACK.  AUTHORIZATION is sent through stdin."
   (let* ((path (make-temp-file "gomuks-transfer-"))
          (bytes 0) (keep nil) process
          (op (gomuks--begin-operation
@@ -170,7 +200,5 @@ file ownership transfers to CALLBACK. AUTHORIZATION is sent through stdin."
          (gomuks--finish-operation op (error-message-string err) nil t))
        op))))
 
-(declare-function gomuks--url "gomuks-backend" (path))
-(declare-function gomuks--authorization "gomuks-backend" ())
 (provide 'gomuks-transport)
 ;;; gomuks-transport.el ends here

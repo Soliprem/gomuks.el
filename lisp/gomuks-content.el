@@ -1,4 +1,4 @@
-;;; gomuks-content.el --- Message transformations -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
+;;; gomuks-content.el --- Message content helpers -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
 
 ;; Copyright (C) 2026 Francesco Prem Solidoro
 ;; Author: Francesco Prem Solidoro <francesco.solidoro@studio.unibo.it>
@@ -6,7 +6,7 @@
 ;; URL: https://github.com/Soliprem/gomuks.el
 
 ;;; Commentary:
-;; Pure payload transformations and read-only effective-content queries.
+;; Build outgoing payloads and read the current (edited) content of events.
 
 ;;; Code:
 
@@ -26,7 +26,7 @@
       `((user_ids . ,(vconcat (nreverse ids)))))))
 
 (defun gomuks--effective-content (event)
-  "Query the current edited content of EVENT without modifying the cache."
+  "Return EVENT's content after its latest edit, or nil when redacted."
   (let* ((current (or (gethash (gomuks--alist 'rowid event) gomuks--events) event))
          (edit (gethash (gomuks--alist 'last_edit_rowid current) gomuks--events)))
     (if (gomuks--alist 'redacted_by current) nil
@@ -36,7 +36,8 @@
         (gomuks--event-content current)))))
 
 (defun gomuks--message-payload (room-id text relation &optional content)
-  "Transform ROOM-ID, TEXT, RELATION and CONTENT into one send payload."
+  "Return the send_message payload for TEXT in ROOM-ID.
+RELATION and base CONTENT are included when non-nil."
   (append `((room_id . ,room-id) (text . ,text))
           (when content `((base_content . ,content)))
           (when relation `((relates_to . ,relation)))
@@ -44,13 +45,13 @@
             `((mentions . ,mentions)))))
 
 (defun gomuks--visible-body (event body)
-  "Transform BODY by removing Matrix's quoted reply fallback for EVENT."
+  "Return BODY without the quoted reply fallback Matrix adds to replies."
   (if (and (stringp body) (gomuks--reply-target event)
            (string-prefix-p "> " body) (string-match "\n\n" body))
       (substring body (match-end 0)) body))
 
 (defun gomuks--edit-source (event)
-  "Query the latest saved Markdown for EVENT, falling back to its visible body."
+  "Return the Markdown last used to write EVENT, or its visible body."
   (let* ((current (or (gethash (gomuks--alist 'rowid event) gomuks--events) event))
          (edit (gethash (gomuks--alist 'last_edit_rowid current) gomuks--events))
          (source (gomuks--alist 'edit_source

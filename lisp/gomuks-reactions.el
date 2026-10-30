@@ -6,7 +6,8 @@
 ;; URL: https://github.com/Soliprem/gomuks.el
 
 ;;; Commentary:
-;; Feature procedures capture room and view ownership before issuing effects.
+;; Reacting to messages, the reaction hover popup and the list of people
+;; who used a reaction.
 
 ;;; Code:
 
@@ -14,6 +15,18 @@
 (declare-function gomuks-reactions-mode "gomuks-ui" ())
 (declare-function emoji--init "emoji" ())
 (declare-function emoji--read-emoji "emoji" ())
+
+(defun gomuks--reactions-with-key (reactions key)
+  "Return the unredacted REACTIONS using KEY, at most one per sender."
+  (let ((seen (make-hash-table :test 'equal)) found)
+    (dolist (reaction reactions (nreverse found))
+      (let ((sender (gomuks--alist 'sender reaction)))
+        (when (and (stringp sender) (not (gethash sender seen))
+                   (not (gomuks--alist 'redacted_by reaction))
+                   (equal key (gomuks--dig (gomuks--event-content reaction)
+                                           'm.relates_to 'key)))
+          (puthash sender t seen)
+          (push reaction found))))))
 
 (defun gomuks--reaction-help-text (id event key count entry)
   "Describe EVENT's KEY reactions in room ID from cached ENTRY and COUNT."
@@ -24,15 +37,10 @@
      ((plist-get entry :pending) "Loading people who reacted…")
      ((plist-get entry :failure) (concat "Could not load reactions: " (plist-get entry :failure)))
      (t
-      (let ((seen (make-hash-table :test 'equal)) people)
-        (dolist (reaction (plist-get entry :events))
-          (let ((user (gomuks--alist 'sender reaction)))
-            (when (and (stringp user) (not (gethash user seen))
-                       (not (gomuks--alist 'redacted_by reaction))
-                       (equal key (gomuks--alist 'key (gomuks--alist 'm.relates_to
-                                                                   (gomuks--event-content reaction)))))
-              (puthash user t seen)
-              (push (gomuks--person-info id user (gomuks--alist 'timestamp reaction)) people))))
+      (let ((people (mapcar (lambda (reaction)
+                              (gomuks--person-info id (gomuks--alist 'sender reaction)
+                                                   (gomuks--alist 'timestamp reaction)))
+                            (gomuks--reactions-with-key (plist-get entry :events) key))))
         (if people (string-join (sort people #'string-lessp) "\n") "No reactions found."))))
     "\nRET shows the reaction list; d there removes yours.")
    (list 'reaction (gomuks--alist 'event_id event) key)))
@@ -68,13 +76,11 @@ Coalesce requests for all reaction keys on a message in this view."
                               (hover-count (or (cdr (assoc-string hover-key counts)) count)))
                          (gomuks--show-hover-help
                           (gomuks--reaction-help-text id event hover-key hover-count entry))))))))))
-        (condition-case err
-            (if event-id
-                (gomuks--post "get_related_events"
-                              `((room_id . ,id) (event_id . ,event-id) (relation_type . "m.annotation"))
-                              complete)
-              (funcall complete "This message has no event ID yet" nil))
-          (error (funcall complete (error-message-string err) nil)))))
+        (if event-id
+            (gomuks--post "get_related_events"
+                          `((room_id . ,id) (event_id . ,event-id) (relation_type . "m.annotation"))
+                          complete)
+          (funcall complete "This message has no event ID yet" nil))))
     (gomuks--reaction-help-text id event key count entry)))
 
 (defun gomuks--read-reaction ()
@@ -133,7 +139,7 @@ Coalesce requests for all reaction keys on a message in this view."
                (message "gomuks: could not remove reaction: %s" failure)
              (when (and event key (buffer-live-p buffer))
                (with-current-buffer buffer
-		 (gomuks-show-reactions event key))))))))))
+                 (gomuks-show-reactions event key))))))))))
 
 (defun gomuks-show-reactions (event key)
   "Show the people who reacted to EVENT with KEY."
@@ -169,39 +175,27 @@ Coalesce requests for all reaction keys on a message in this view."
                 (when (and (gomuks--cache-current-p id generation)
                            (gomuks--view-current-p buffer view))
                   (with-current-buffer buffer
-                    (let ((inhibit-read-only t)
-                          (seen (make-hash-table :test 'equal))
-                          (count 0))
+                    (let ((inhibit-read-only t))
                       (erase-buffer)
                       (if failure
                           (insert (propertize
                                    (format "Could not load reactions: %s\n" failure)
                                    'face 'error))
                         (gomuks--store-events response)
-                        (dolist (reaction response)
-                          (let ((sender (gomuks--alist 'sender reaction))
-                                (reaction-id (gomuks--alist 'event_id reaction)))
-                            (when (and (stringp sender)
-                                       (not (gomuks--alist 'redacted_by reaction))
-                                       (equal key
-                                              (gomuks--alist
-                                               'key (gomuks--alist
-                                                     'm.relates_to
-                                                     (gomuks--event-content reaction))))
-                                       (not (gethash sender seen)))
-                              (puthash sender t seen)
-                              (setq count (1+ count))
-                              (let ((start (point)))
-                                (insert (gomuks--sender-name id reaction)
-                                        "  " (propertize sender 'face 'shadow)
-                                        (if (equal sender gomuks--user-id)
-                                            "  [d remove]" "") "\n")
-                                (put-text-property start (point)
-                                                   'gomuks-reaction-event-id reaction-id)
-                                (put-text-property start (point)
-                                                   'gomuks-reaction-sender sender)))))
-                        (when (= count 0)
-                          (insert "No reactions found.\n"))))
+                        (let ((reactions (gomuks--reactions-with-key response key)))
+                          (dolist (reaction reactions)
+                            (let ((sender (gomuks--alist 'sender reaction))
+                                  (start (point)))
+                              (insert (gomuks--sender-name id reaction)
+                                      "  " (propertize sender 'face 'shadow)
+                                      (if (equal sender gomuks--user-id)
+                                          "  [d remove]" "") "\n")
+                              (add-text-properties
+                               start (point)
+                               (list 'gomuks-reaction-event-id (gomuks--alist 'event_id reaction)
+                                     'gomuks-reaction-sender sender))))
+                          (unless reactions
+                            (insert "No reactions found.\n")))))
                     (goto-char (point-min)))))))))
       (if gomuks--user-id
           (funcall load)

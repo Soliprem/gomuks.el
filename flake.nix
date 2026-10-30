@@ -15,9 +15,6 @@
           emacs
           curl
         ];
-        shellHook = ''
-          hello
-        '';
       };
     };
   };

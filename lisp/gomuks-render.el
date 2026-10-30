@@ -1,4 +1,4 @@
-;;; gomuks-render.el --- Cached state display -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
+;;; gomuks-render.el --- Drawing views from the cache -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
 
 ;; Copyright (C) 2026 Francesco Prem Solidoro
 ;; Author: Francesco Prem Solidoro <francesco.solidoro@studio.unibo.it>
@@ -6,12 +6,15 @@
 ;; URL: https://github.com/Soliprem/gomuks.el
 
 ;;; Commentary:
-;; Queries and buffer rendering only. Rendering never starts network requests.
+;; Draw the home page, timelines and search results from cached state.
+;; Drawing never starts requests; `gomuks--refresh-view' does that afterwards.
 
 ;;; Code:
 
 (require 'gomuks-media)
 (require 'gomuks-content)
+(require 'dom)
+(require 'shr)
 (declare-function gomuks-follow-reply "gomuks-view" (&optional target))
 (declare-function gomuks-open-thread "gomuks-view" (&optional event))
 (declare-function gomuks-show-reactions "gomuks-reactions" (event key))
@@ -19,13 +22,10 @@
 
 (defun gomuks--person-info (id user timestamp)
   "Describe USER in room ID, including a local TIMESTAMP when available."
-  (let ((name (replace-regexp-in-string
-               "[\n\r]+" " " (gomuks--sender-name id `((sender . ,user))))))
+  (let ((name (gomuks--one-line (gomuks--sender-name id `((sender . ,user))))))
     (concat name (unless (equal name user) (format " (%s)" user))
             (when (numberp timestamp)
-              (concat " · " (format-time-string
-                              "%Y-%m-%d %H:%M:%S %Z"
-                              (seconds-to-time (/ timestamp 1000.0))))))))
+              (concat " · " (gomuks--format-time "%Y-%m-%d %H:%M:%S %Z" timestamp))))))
 
 (defun gomuks--hover-text (text target)
   "Mark TEXT as popup details for hover TARGET."
@@ -55,20 +55,13 @@
   (when-let* ((buffer (get-buffer "*Gomuks*")))
     (with-current-buffer buffer
       (let ((inhibit-read-only t)
-            (entries nil)
+            (entries (gomuks--rooms-by-recency
+                      (lambda (id) (not (member id gomuks--hidden-room-ids)))))
             (selected (get-text-property (point) 'gomuks-room-id))
             (unread-total 0)
             (status (if (and (string= gomuks--connection-status "Disconnected")
                              (process-live-p gomuks--stream))
                         "Connected" gomuks--connection-status)))
-        (maphash (lambda (id meta)
-                   (unless (member id gomuks--hidden-room-ids)
-                     (push (cons id meta) entries)))
-                 gomuks--rooms)
-        (setq entries (sort entries
-                            (lambda (a b)
-                              (> (or (gomuks--alist 'sorting_timestamp (cdr a)) 0)
-                                 (or (gomuks--alist 'sorting_timestamp (cdr b)) 0)))))
         (dolist (entry entries)
           (cl-incf unread-total
                    (or (gomuks--alist 'unread_notifications (cdr entry)) 0)))
@@ -111,7 +104,7 @@
                         (propertize "[muted] " 'face 'shadow)
                       "")
                     (propertize (truncate-string-to-width
-                                 (replace-regexp-in-string "[\n\r]+" " " preview)
+                                 (gomuks--one-line preview)
                                  (max 12 (- (window-width) 50)) nil nil "…")
                                 'face 'shadow)
                     (if (> unread 0)
@@ -149,20 +142,25 @@ Remove the quoted reply fallback for EVENT before rendering."
             (string-trim-right (buffer-string))))
       (error nil))))
 
+(defun gomuks--event-summary (event width)
+  "Return EVENT's text on one line, truncated to WIDTH."
+  (truncate-string-to-width
+   (gomuks--one-line
+    (if (gomuks--alist 'redacted_by event) "[redacted]"
+      (or (gomuks--visible-body
+           event (gomuks--alist 'body (gomuks--effective-content event)))
+          "[attachment]")))
+   width nil nil "…"))
+
 (defun gomuks--reply-summary (room-id event-id)
   "Return a short label for EVENT-ID in ROOM-ID."
   (if-let* ((event (gomuks--find-event room-id event-id)))
-      (let ((body (gomuks--visible-body
-                   event (gomuks--alist 'body (gomuks--effective-content event)))))
-        (format "%s: %s"
-                (gomuks--sender-name room-id event)
-                (truncate-string-to-width
-                 (replace-regexp-in-string "[\n\r]+" " " (if (gomuks--alist 'redacted_by event) "[redacted]" (or body "[attachment]")))
-                 72 nil nil "…")))
+      (format "%s: %s" (gomuks--sender-name room-id event)
+              (gomuks--event-summary event 72))
     "earlier message"))
 
 (defun gomuks--thread-counts (room-id)
-  "Query cached reply counts for ROOM-ID without scanning unrelated events."
+  "Return a table of thread reply counts in ROOM-ID, keyed by root ID."
   (let ((counts (make-hash-table :test 'equal)))
     (maphash (lambda (key rows)
                (when (equal (car key) room-id)
@@ -170,16 +168,6 @@ Remove the quoted reply fallback for EVENT before rendering."
                    (puthash (cdr key) (hash-table-count rows) counts))))
              gomuks--thread-index)
     counts))
-
-(defun gomuks--event-at-point ()
-  "Return the message event at point, or signal a user error."
-  (or (unless (get-text-property (point) 'gomuks-date)
-        (or (gethash (or (get-text-property (point) 'gomuks-event-rowid)
-                        (get-text-property (max (point-min) (1- (point))) 'gomuks-event-rowid))
-                    gomuks--events)
-            (get-text-property (point) 'gomuks-event)
-            (get-text-property (max (point-min) (1- (point))) 'gomuks-event)))
-      (user-error "No message on this line")))
 
 (defun gomuks--buttonize-urls (start end)
   "Make URLs between START and END clickable without changing their text."
@@ -245,7 +233,7 @@ Remove the quoted reply fallback for EVENT before rendering."
   "Return EVENT's local calendar date, or nil without a timestamp."
   (when-let* ((timestamp (gomuks--alist 'timestamp event))
               ((numberp timestamp)))
-    (format-time-string "%Y-%m-%d" (seconds-to-time (/ timestamp 1000.0)))))
+    (gomuks--format-time "%Y-%m-%d" timestamp)))
 
 (defun gomuks--readers-for-events (id events)
   "Map displayed event IDs to public receipt records in room ID's EVENTS.
@@ -259,8 +247,7 @@ Receipts on hidden events attach to the preceding visible message."
                   (gomuks--alist 'body content)
                   (gomuks--formatted-body content event)
                   (gomuks--attachment content event)
-                  (equal (or (gomuks--alist 'decrypted_type event)
-                             (gomuks--alist 'type event)) "m.room.encrypted"))
+                  (equal (gomuks--event-type event) "m.room.encrypted"))
           (setq previous event-id))
         (when event-id (puthash event-id previous positions))))
     (when-let* ((state (gethash id gomuks--receipts)))
@@ -291,8 +278,7 @@ READERS maps displayed event IDs to the public receipts at those positions."
          (reactions (cl-remove-if-not
                      (lambda (entry) (and (numberp (cdr entry)) (> (cdr entry) 0)))
                      (gomuks--alist 'reactions event)))
-         (kind (or (gomuks--alist 'decrypted_type event)
-                   (gomuks--alist 'type event))))
+         (kind (gomuks--event-type event)))
     (when (or body attachment (string= kind "m.room.encrypted"))
       (let* ((start (point))
              (sender (gomuks--alist 'sender event))
@@ -308,18 +294,13 @@ READERS maps displayed event IDs to the public receipts at those positions."
                            (<= 0 (- timestamp previous-time) (* 15 60 1000)))))
         (when (and date (not (equal date previous-date)))
           (insert (propertize
-                   (concat "\n── "
-                           (format-time-string "%A, %Y-%m-%d"
-                                               (seconds-to-time (/ timestamp 1000.0)))
+                   (concat "\n── " (gomuks--format-time "%A, %Y-%m-%d" timestamp)
                            " ──\n\n")
                    'face 'shadow 'gomuks-date date
                    'gomuks-event nil 'gomuks-event-rowid nil)))
         (setq start (point))
         (insert (propertize
-                 (if timestamp
-                     (format-time-string "%H:%M"
-                                         (seconds-to-time (/ timestamp 1000.0)))
-                   "     ")
+                 (if timestamp (gomuks--format-time "%H:%M" timestamp) "     ")
                  'face 'shadow)
                 "  ")
         (if grouped
@@ -412,8 +393,8 @@ READERS maps displayed event IDs to the public receipts at those positions."
         t))))
 
 (defun gomuks--room-header (id kind)
-  "Query the fixed header for room ID and view KIND."
-  (let* ((name (replace-regexp-in-string "[\n\r]+" " " (gomuks--room-name id)))
+  "Return the header line for room ID's view of KIND."
+  (let* ((name (gomuks--one-line (gomuks--room-name id)))
          (topic (gomuks--alist 'topic (gethash id gomuks--rooms)))
          (label (pcase kind ('context "REPLY CONTEXT") ('thread "THREAD"))))
     (concat " " (propertize name 'face 'gomuks-room-face)
@@ -424,7 +405,7 @@ READERS maps displayed event IDs to the public receipts at those positions."
               (concat "  ·  "
                       (propertize
                        (truncate-string-to-width
-                        (replace-regexp-in-string "[\n\r]+" " " topic)
+                        (gomuks--one-line topic)
                         (max 20 (- (window-width) (string-width name) 10))
                         nil nil "…")
                        'face 'shadow))))))
@@ -449,7 +430,7 @@ READERS maps displayed event IDs to the public receipts at those positions."
         (min fallback (point-max))))))
 
 (defun gomuks--render-buffer (buffer id)
-  "Write room ID's BUFFER and return its current events for dependency scheduling."
+  "Redraw room ID's BUFFER from the cache and return the events shown."
   ;; visible redraw stays O(n); bound or incrementally update history
   ;; when measured latency requires it. Hidden views defer this work.
   (when (buffer-live-p buffer)
@@ -514,7 +495,7 @@ READERS maps displayed event IDs to the public receipts at those positions."
     found))
 
 (defun gomuks--render-search ()
-  "Write this search buffer and return the events used for its dependencies."
+  "Redraw this search buffer and return the events shown."
   (let ((inhibit-read-only t)
         (events (gomuks--events-for-rows (gomuks--event-rows gomuks--search-results)))
         (selected (get-text-property (point) 'gomuks-event-id)))
@@ -524,16 +505,10 @@ READERS maps displayed event IDs to the public receipts at those positions."
             (format "%s  ·  RET open  ·  n more  ·  q back\n\n"
                     gomuks--search-query))
     (dolist (event events)
-      (let* ((start (point))
-             (timestamp (gomuks--alist 'timestamp event))
-             (body (gomuks--visible-body
-                    event (gomuks--alist 'body (gomuks--effective-content event))))
-             (summary (truncate-string-to-width
-                       (replace-regexp-in-string "[\n\r]+" " " (if (gomuks--alist 'redacted_by event) "[redacted]" (or body "[attachment]")))
-                       (max 30 (- (window-width) 32)) nil nil "…")))
-        (insert (if timestamp
-                    (format-time-string "%Y-%m-%d %H:%M "
-                                        (seconds-to-time (/ timestamp 1000.0)))
+      (let ((start (point))
+            (timestamp (gomuks--alist 'timestamp event))
+            (summary (gomuks--event-summary event (max 30 (- (window-width) 32)))))
+        (insert (if timestamp (gomuks--format-time "%Y-%m-%d %H:%M " timestamp)
                   "                 ")
                 (gomuks--sender-name gomuks--room-id event) ": " summary "\n")
         (put-text-property start (point) 'gomuks-event event)

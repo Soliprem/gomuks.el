@@ -1,4 +1,4 @@
-;;; gomuks-view.el --- Room navigation and history workflows -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
+;;; gomuks-view.el --- Room navigation and history -*- lexical-binding: t; package-lint-main-file: "../gomuks.el"; -*-
 
 ;; Copyright (C) 2026 Francesco Prem Solidoro
 ;; Author: Francesco Prem Solidoro <francesco.solidoro@studio.unibo.it>
@@ -6,7 +6,8 @@
 ;; URL: https://github.com/Soliprem/gomuks.el
 
 ;;; Commentary:
-;; Own view identities and pagination. Cached-state rendering lives in gomuks-render.
+;; Opening rooms, threads and reply contexts, pagination, read markers and
+;; notifications.  Drawing a buffer from the cache lives in gomuks-render.
 
 ;;; Code:
 
@@ -15,11 +16,7 @@
 (require 'tooltip)
 (declare-function gomuks-rooms-mode "gomuks-ui")
 (declare-function gomuks-room-mode "gomuks-ui")
-(declare-function gomuks-search-mode "gomuks-ui")
-(declare-function gomuks-reactions-mode "gomuks-ui")
 (declare-function notifications-notify "notifications")
-(declare-function emoji--init "emoji")
-(declare-function emoji--read-emoji "emoji")
 (declare-function gomuks--refresh-sticker-pickers "gomuks-stickers" (&optional id fetch))
 
 (defvar-local gomuks--hover-target nil "Details currently displayed in a hover popup.")
@@ -68,9 +65,8 @@
         (gomuks--alist 'event_id (gomuks--reaction-target))))
 
 (defun gomuks--reaction-target ()
-  "Query the current reaction target, accepting an old buffer on reload."
-  (cond ((listp gomuks--reactions-event) gomuks--reactions-event)
-        ((stringp gomuks--reactions-event)
+  "Return the event whose reactions this buffer shows."
+  (cond ((stringp gomuks--reactions-event)
          (or (gomuks--find-event gomuks--room-id gomuks--reactions-event)
              `((event_id . ,gomuks--reactions-event))))
         (t (gethash gomuks--reactions-event gomuks--events))))
@@ -81,7 +77,7 @@
        (with-current-buffer buffer (equal identity (gomuks--view-identity)))))
 
 (defun gomuks--navigation-current-p (buffer identity serial)
-  "Query whether BUFFER still owns navigation SERIAL for view IDENTITY."
+  "Return non-nil when SERIAL is still BUFFER's latest navigation in IDENTITY."
   (and (gomuks--view-current-p buffer identity)
        (= serial (buffer-local-value 'gomuks--navigation-serial buffer))))
 
@@ -110,6 +106,20 @@ non-nil, update only views for that room.  Start no requests."
         (when (eq gomuks--hover-buffer buffer) (gomuks--hide-hover))
         (let ((inhibit-read-only t)) (erase-buffer))))))
 
+(defun gomuks--show-sync (sync reset)
+  "Redraw what SYNC changed, after resetting the views of rooms in RESET."
+  (if (gomuks--alist 'clear_state sync) (gomuks--reset-views)
+    (dolist (id reset) (gomuks--reset-views id)))
+  (dolist (entry (gomuks--alist 'rooms sync))
+    (gomuks--update-room-views (gomuks--key-string (car entry))
+                               (gomuks--alist 'events (cdr entry))))
+  (gomuks--render-rooms)
+  (gomuks--maybe-mark-read)
+  (dolist (entry (gomuks--alist 'rooms sync))
+    (let ((id (gomuks--key-string (car entry))))
+      (dolist (notice (gomuks--alist 'notifications (cdr entry)))
+        (when-let* ((event (gethash (gomuks--alist 'event_rowid notice) gomuks--events)))
+          (gomuks--notify id event))))))
 
 (defun gomuks--echo-area-notifications-p ()
   "Return non-nil when incoming messages should appear in the echo area."
@@ -165,22 +175,18 @@ non-nil, update only views for that room.  Start no requests."
             (puthash (cons id event-id) t gomuks--requested-receipts)
             (push event-id ids))))
       (when ids
-        (let ((complete
-               (lambda (failure receipts)
-                 (when (gomuks--cache-current-p id token)
-                   (if failure
-                       (dolist (event-id ids)
-                         (remhash (cons id event-id) gomuks--requested-receipts))
-                     (gomuks--store-receipts id receipts)
-                     (gomuks--update-room-views id))))))
-          (condition-case err
-              (gomuks--post "get_receipts"
-                            `((room_id . ,id) (event_ids . ,(vconcat (nreverse ids))))
-                            complete)
-            (error (funcall complete (error-message-string err) nil))))))))
+        (gomuks--post
+         "get_receipts" `((room_id . ,id) (event_ids . ,(vconcat (nreverse ids))))
+         (lambda (failure receipts)
+           (when (gomuks--cache-current-p id token)
+             (if failure
+                 (dolist (event-id ids)
+                   (remhash (cons id event-id) gomuks--requested-receipts))
+               (gomuks--store-receipts id receipts)
+               (gomuks--update-room-views id)))))))))
 
 (defun gomuks--refresh-view (buffer)
-  "Procedure: render BUFFER, then explicitly schedule its missing dependencies."
+  "Redraw BUFFER, then request the members, receipts and previews it lacks."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (let* ((id gomuks--room-id)
@@ -200,8 +206,8 @@ non-nil, update only views for that room.  Start no requests."
             (gomuks--maybe-preview-image attachment id)))))))
 
 (defun gomuks--update-room-views (id &optional incoming)
-  "Procedure: update ID's retained views and refresh each visible view once.
-INCOMING events extend thread membership, including views currently hidden."
+  "Mark room ID's views out of date and redraw the visible ones.
+INCOMING events are added to open threads, including hidden ones."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (and (derived-mode-p 'gomuks-room-mode 'gomuks-search-mode)
@@ -352,23 +358,15 @@ INCOMING events extend thread membership, including views currently hidden."
 
 (defun gomuks--switch-room (hidden)
   "Choose a cached room and open it, selecting HIDDEN rooms when non-nil."
-  (let (rooms)
-    (maphash (lambda (id meta)
-               (when (if hidden (member id gomuks--hidden-room-ids)
-                       (not (member id gomuks--hidden-room-ids)))
-                 (push (cons id meta) rooms)))
-             gomuks--rooms)
+  (let ((rooms (gomuks--rooms-by-recency
+                (lambda (id) (if hidden (member id gomuks--hidden-room-ids)
+                               (not (member id gomuks--hidden-room-ids)))))))
     (unless rooms (user-error (if hidden "No hidden rooms loaded yet"
                                 "No rooms loaded yet")))
-    (setq rooms (sort rooms
-                      (lambda (a b)
-                        (> (or (gomuks--alist 'sorting_timestamp (cdr a)) 0)
-                           (or (gomuks--alist 'sorting_timestamp (cdr b)) 0)))))
     (let* ((candidates
             (mapcar (lambda (room)
                       (let* ((id (car room))
-                             (name (replace-regexp-in-string
-                                    "[\n\r]+" " " (gomuks--room-name id)))
+                             (name (gomuks--one-line (gomuks--room-name id)))
                              (unread (or (gomuks--alist 'unread_notifications
                                                         (cdr room)) 0)))
                         (cons (format "%s%s  %s" name
@@ -393,7 +391,7 @@ INCOMING events extend thread membership, including views currently hidden."
   (gomuks--switch-room t))
 
 (defun gomuks-toggle-hidden-room ()
-  "Persist a proposed visibility preference, then commit it to live state."
+  "Hide or unhide this room, saving the change before applying it."
   (interactive)
   (let ((id (or gomuks--room-id (get-text-property (point) 'gomuks-room-id))))
     (unless id (user-error "No room selected"))
@@ -442,8 +440,8 @@ INCOMING events extend thread membership, including views currently hidden."
       (recenter))))
 
 (defun gomuks--fetch-context (target navigation &optional fallback-event)
-  "Procedure: fetch TARGET's context for this view's NAVIGATION request.
-On failure, use FALLBACK-EVENT if supplied; otherwise fetch TARGET alone."
+  "Show the messages around TARGET, unless NAVIGATION has been superseded.
+On failure, show FALLBACK-EVENT if supplied; otherwise fetch TARGET alone."
   (let* ((id gomuks--room-id) (source (current-buffer))
          (view (gomuks--view-identity)) (generation (gomuks--cache-token id)))
     (gomuks--post
@@ -519,7 +517,7 @@ On failure, use FALLBACK-EVENT if supplied; otherwise fetch TARGET alone."
                     (message "gomuks: %s" (or failure "marked read"))))))
 
 (defun gomuks-load-history ()
-  "Advance this view's explicit history workflow by one older page."
+  "Load one page of older messages in this room or thread."
   (interactive)
   (unless gomuks--room-id (user-error "Open a room first"))
   (when gomuks--context-target
@@ -530,7 +528,7 @@ On failure, use FALLBACK-EVENT if supplied; otherwise fetch TARGET alone."
     (_ (gomuks--request-history))))
 
 (defun gomuks--request-history ()
-  "Procedure: capture ownership, request one page, then commit it if still current."
+  "Request one page of older messages, storing it only if this view is unchanged."
   (let* ((buffer (current-buffer)) (id gomuks--room-id)
          (view (gomuks--view-identity)) (generation (gomuks--cache-token id))
          (serial (cl-incf gomuks--history-serial)) (root gomuks--thread-root)
@@ -555,17 +553,15 @@ On failure, use FALLBACK-EVENT if supplied; otherwise fetch TARGET alone."
                         (setq gomuks--history-state 'error
                               gomuks--initial-history-requested nil)
                         (message "gomuks: history failed: %s" failure))
-                    (let* ((events (gomuks--alist 'events response))
-                           (next (gomuks--alist 'next_batch response))
-                           added)
+                    (let ((events (gomuks--alist 'events response))
+                          added)
                       (gomuks--store-events
                        (append events (gomuks--alist 'related_events response)))
                       (if root
                           (setq gomuks--thread-events
                                 (gomuks--merge-thread-rows root gomuks--thread-events events)
                                 gomuks--thread-next-batch
-                                (and (stringp next) (not (string-empty-p next))
-                                     (not (equal next token)) next)
+                                (gomuks--next-token response 'next_batch token)
                                 gomuks--history-state
                                 (if gomuks--thread-next-batch 'idle 'exhausted))
                         (setq added
@@ -575,8 +571,8 @@ On failure, use FALLBACK-EVENT if supplied; otherwise fetch TARGET alone."
                                               (timeline_rowid . ,(gomuks--alist 'timeline_rowid event))))
                                           (reverse events)) t)
                               gomuks--history-state (if (and added (or (not (assq 'has_more response))
-								       (gomuks--alist 'has_more response)))
-							'idle 'exhausted)))
+                                                                       (gomuks--alist 'has_more response)))
+                                                        'idle 'exhausted)))
                       (setq gomuks--initial-history-requested t)
                       (gomuks--store-receipts id (gomuks--alist 'receipts response))
                       (when (assq 'receipts response)
@@ -586,8 +582,7 @@ On failure, use FALLBACK-EVENT if supplied; otherwise fetch TARGET alone."
                       (gomuks--update-room-views id)
                       (gomuks--maybe-mark-read)))))))))
     (setq gomuks--history-state 'loading gomuks--initial-history-requested t)
-    (condition-case err (gomuks--post command data complete)
-      (error (funcall complete (error-message-string err) nil)))))
+    (gomuks--post command data complete)))
 
 (defun gomuks-open-thread (&optional event)
   "Open the thread containing EVENT, or the message at point."
