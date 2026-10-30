@@ -76,6 +76,9 @@ The default shows them only while a Gomuks buffer is selected."
 (defface gomuks-unread-face
   '((t :inherit warning :weight bold))
   "Unread counters." :group 'gomuks)
+(defface gomuks-separator-face
+  '((t :inherit shadow :strike-through t))
+  "Horizontal rules in message bodies." :group 'gomuks)
 
 ;;;; Change notifications
 

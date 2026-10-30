@@ -118,6 +118,14 @@
                        (next-single-property-change (point-min) 'gomuks-room-id)
                        (point-min)))))))
 
+(defun gomuks--shr-tag-hr (_dom)
+  "Render a horizontal rule that stretches to the window's right edge.
+shr would otherwise draw `shr-width' dashes, which is huge here."
+  (shr-ensure-newline)
+  (insert (propertize "---" 'face 'gomuks-separator-face
+                      'display '(space :align-to (- right 1)))
+          "\n"))
+
 (defun gomuks--formatted-body (content event)
   "Render CONTENT's Matrix HTML, or return nil if it cannot be rendered.
 Remove the quoted reply fallback for EVENT before rendering."
@@ -131,7 +139,10 @@ Remove the quoted reply fallback for EVENT before rendering."
                  (body (or (car (dom-by-tag dom 'body)) dom))
                  (shr-width 10000)
                  (shr-use-fonts nil)
-                 (shr-inhibit-images t))
+                 (shr-inhibit-images t)
+                 (shr-external-rendering-functions
+                  (cons '(hr . gomuks--shr-tag-hr)
+                        shr-external-rendering-functions)))
             (when (gomuks--reply-target event)
               (setcdr (cdr body)
                       (cl-remove-if (lambda (node)
